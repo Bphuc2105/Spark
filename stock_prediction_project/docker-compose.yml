@@ -1,0 +1,67 @@
+# docker-compose.yml
+    
+services:
+  spark-master:
+    image: bitnami/spark:3.4.1 
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - '8080:8080' 
+      - '7077:7077' 
+    networks:
+      - spark-network
+    
+  spark-worker:
+    image: bitnami/spark:3.4.1 
+    container_name: spark-worker-1
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G 
+      - SPARK_WORKER_CORES=1   
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - '8081:8081' 
+    volumes: # Thêm volume mount này cho worker
+      - .:/app  
+    networks:
+      - spark-network
+    
+  spark-app:
+    build:
+      context: . 
+      dockerfile: Dockerfile 
+    container_name: spark-app-submitter
+    depends_on:
+      - spark-master 
+    environment:
+      - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077 
+      - PYTHONUNBUFFERED=1 
+    volumes:
+      - .:/app 
+    networks:
+      - spark-network
+    command: >
+      sh -c "echo '--- Listing contents of /app (from spark-app) ---' && \
+      ls -l /app && \
+      echo '--- Listing contents of /app/data (from spark-app) ---' && \
+      ls -l /app/data && \
+      echo '--- Attempting to submit Spark job ---' && \
+      spark-submit \
+      --master spark://spark-master:7077 \
+      --deploy-mode client \
+      /app/main.py train"
+
+networks:
+  spark-network:
+    driver: bridge

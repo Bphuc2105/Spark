@@ -1,0 +1,4 @@
+date_str,open_price,close_price,symbol
+2023-01-01,100.0,102.5,AAPL
+2023-01-01,200.0,198.5,MSFT
+2023-01-02,102.0,103.0,AAPL 
