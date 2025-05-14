@@ -16,8 +16,8 @@ TRAIN_PRICES_FILE = f"{DATA_DIR}/prices.csv"
 TRAIN_ARTICLES_FILE = f"{DATA_DIR}/articles.csv"
 
 # Đường dẫn cụ thể cho các tệp dữ liệu dự đoán (nếu có)
-PREDICT_PRICES_FILE = f"{DATA_DIR}/new_prices_sample.csv"
-PREDICT_ARTICLES_FILE = f"{DATA_DIR}/new_articles_sample.csv"
+PREDICT_PRICES_FILE = f"{DATA_DIR}/new_prices.csv"
+PREDICT_ARTICLES_FILE = f"{DATA_DIR}/new_articles.csv"
 
 # Đường dẫn để lưu/tải mô hình đã huấn luyện
 SAVED_MODEL_PATH = f"{MODELS_DIR}/stock_prediction_pipeline_model"

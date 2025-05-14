@@ -121,8 +121,8 @@ if __name__ == "__main__":
     spark = get_spark_session("PreprocessingTest")
 
     # --- Cấu hình đường dẫn (giống như trong data_loader.py) ---
-    prices_path = "../data/prices_sample.csv"
-    articles_path = "../data/articles_sample.csv"
+    prices_path = "../data/prices.csv"
+    articles_path = "../data/articles.csv"
 
     # --- Tải dữ liệu ---
     prices_df = load_stock_prices(spark, prices_path)
