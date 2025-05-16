@@ -1,185 +1,155 @@
 # src/preprocessing.py
 
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, VectorAssembler, SQLTransformer, RegexTokenizer
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, VectorAssembler, SQLTransformer
-from pyspark.sql.functions import col, when
+from pyspark.sql.types import DoubleType
 
-def create_label(input_df, open_col="open_price", close_col="close_price", label_col="label"):
+# Import cấu hình sử dụng relative import
+try:
+    from .config import HASHING_TF_NUM_FEATURES, VIETNAMESE_STOPWORDS
+except ImportError:
+    print("Cảnh báo: Không thể import .config trong preprocessing.py, sử dụng giá trị mặc định.")
+    HASHING_TF_NUM_FEATURES = 10000
+    # Ví dụ rút gọn, đảm bảo VIETNAMESE_STOPWORDS được định nghĩa nếu config không import được
+    VIETNAMESE_STOPWORDS = [
+        "và", "là", "có", "của", "trong", "cho", "đến", "khi", "thì", "mà", "ở", "tại",
+        "này", "đó", "các", "những", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín", "mười",
+        "được", "bị", "do", "vì", "nên", "nhưng", "nếu", "thế", "đã", "sẽ", "đang", "rằng", "vẫn",
+        "để", "không", "có_thể", "cũng", "với", "như", "về", "sau", "trước", "trên", "dưới",
+        "ông", "bà", "anh", "chị", "em", "tôi", "chúng_tôi", "bạn", "họ", "ai", "gì",
+        "ngày", "tháng", "năm", "theo", "tuy_nhiên", "tuyệt_vời", "bao_gồm", "thực_sự",
+        "vào", "ra", "lên", "xuống", "qua", "lại", "từ", "chỉ", "còn", "mới", "rất", "quá",
+        "điều", "việc", "người", "cách", "khác", "phải", "luôn", "bao_giờ", "hơn", "nhất"
+    ]
+
+
+def create_preprocessing_pipeline(
+    text_input_col="full_article_text",
+    numerical_input_cols=["open_price"],
+    output_features_col="features",
+    output_label_col="label"
+):
     """
-    Tạo cột nhãn dựa trên việc giá đóng cửa có cao hơn giá mở cửa hay không.
-    1 nếu close_price > open_price, ngược lại là 0.
+    Tạo một Pipeline tiền xử lý cho cả dữ liệu văn bản và dữ liệu số.
+    Nhãn sẽ được tạo dưới dạng phần trăm thay đổi giá.
 
     Args:
-        input_df (DataFrame): DataFrame đầu vào chứa cột giá mở cửa và giá đóng cửa.
-        open_col (str): Tên cột giá mở cửa.
-        close_col (str): Tên cột giá đóng cửa.
-        label_col (str): Tên cột nhãn sẽ được tạo.
+        text_input_col (str): Tên cột chứa văn bản đầu vào.
+        numerical_input_cols (list): Danh sách tên các cột số đầu vào.
+        output_features_col (str): Tên cột chứa vector đặc trưng kết hợp đầu ra.
+        output_label_col (str): Tên cột chứa nhãn hồi quy (phần trăm thay đổi giá).
 
     Returns:
-        DataFrame: DataFrame với cột nhãn đã được thêm vào.
+        pyspark.ml.Pipeline: Đối tượng Pipeline chứa các stage tiền xử lý.
     """
-    print(f"Tạo cột nhãn '{label_col}'...")
-    # Đảm bảo các cột cần thiết tồn tại
-    if open_col not in input_df.columns or close_col not in input_df.columns:
-        raise ValueError(f"Các cột '{open_col}' và/hoặc '{close_col}' không tồn tại trong DataFrame đầu vào.")
-
-    # Xử lý trường hợp giá trị null trong open_price hoặc close_price nếu cần
-    # Ví dụ: input_df = input_df.na.drop(subset=[open_col, close_col])
-
-    labeled_df = input_df.withColumn(label_col,
-                                     when(col(close_col) > col(open_col), 1.0)
-                                     .otherwise(0.0))
-    print(f"Số lượng mẫu theo nhãn:")
-    labeled_df.groupBy(label_col).count().show()
-    return labeled_df
-
-def create_preprocessing_pipeline(text_input_col="full_article_text",
-                                  numerical_input_cols=["open_price"], # Danh sách các cột số
-                                  output_features_col="features",
-                                  output_label_col="label"):
-    """
-    Tạo một Spark ML Pipeline để tiền xử lý dữ liệu.
-    Pipeline bao gồm:
-    1. Tạo nhãn (sử dụng SQLTransformer cho tính linh hoạt trong pipeline).
-    2. Tokenizer: Tách văn bản thành các từ.
-    3. StopWordsRemover: Loại bỏ các từ dừng phổ biến.
-    4. HashingTF: Chuyển đổi các từ thành vector tần số thô.
-    5. IDF: Tính toán Inverse Document Frequency.
-    6. VectorAssembler: Kết hợp các đặc trưng văn bản (TF-IDF) và đặc trưng số.
-
-    Args:
-        text_input_col (str): Tên cột chứa văn bản đầu vào (ví dụ: 'full_article_text').
-        numerical_input_cols (list): Danh sách tên các cột đặc trưng số (ví dụ: ['open_price']).
-        output_features_col (str): Tên cột chứa vector đặc trưng kết hợp cuối cùng.
-        output_label_col (str): Tên cột nhãn.
-
-    Returns:
-        pyspark.ml.Pipeline: Đối tượng Pipeline đã được cấu hình.
-    """
-    print("Đang tạo pipeline tiền xử lý...")
-
-    # Bước 1: Tạo nhãn (sử dụng SQLTransformer để tích hợp vào pipeline)
-    # Câu lệnh SQL này giả định cột 'open_price' và 'close_price' tồn tại trong DataFrame đầu vào của pipeline
-    # Lưu ý: Cột 'label' sẽ được tạo bởi SQLTransformer này.
-    # Nếu bạn đã tạo nhãn trước đó bằng hàm create_label, bạn có thể bỏ qua bước này
-    # hoặc đảm bảo nó không xung đột. Trong thiết kế này, pipeline sẽ tự tạo nhãn.
-    sql_transformer_label = SQLTransformer(
-        statement=f"SELECT *, CAST((CASE WHEN close_price > open_price THEN 1.0 ELSE 0.0 END) AS DOUBLE) AS {output_label_col} FROM __THIS__"
+    regex_tokenizer = RegexTokenizer(
+        inputCol=text_input_col,
+        outputCol="tokens",
+        pattern="\\W"
     )
 
-    # Bước 2: Tokenizer cho văn bản
-    tokenizer = Tokenizer(inputCol=text_input_col, outputCol="words")
+    stopwords_remover = StopWordsRemover(
+        inputCol="tokens",
+        outputCol="filtered_tokens",
+        stopWords=VIETNAMESE_STOPWORDS # Đảm bảo biến này được định nghĩa
+    )
 
-    # Bước 3: StopWordsRemover
-    # Bạn có thể tùy chỉnh danh sách từ dừng hoặc sử dụng danh sách mặc định cho tiếng Anh
-    # stopwords_remover = StopWordsRemover(inputCol="words", outputCol="filtered_words", locale="en_US")
-    # Đối với tiếng Việt, bạn cần cung cấp danh sách từ dừng tiếng Việt
-    # Ví dụ (cần một danh sách đầy đủ hơn):
-    vietnamese_stopwords = ["và", "là", "có", "của", "trong", "cho", "đến", "khi", "thì", "mà", "ở", "tại", "này", "đó", "các", "những", "một", "hai", "ba", "được", "bị", "rằng", "để", "không", "có_thể", "cũng", "với", "như", "về", "sau", "trước", "trên", "dưới"] # Cần danh sách đầy đủ hơn
-    stopwords_remover = StopWordsRemover(inputCol=tokenizer.getOutputCol(),
-                                         outputCol="filtered_words",
-                                         stopWords=vietnamese_stopwords) # Sử dụng danh sách từ dừng tiếng Việt
+    hashing_tf = HashingTF(
+        inputCol="filtered_tokens",
+        outputCol="raw_text_features",
+        numFeatures=HASHING_TF_NUM_FEATURES # Đảm bảo biến này được định nghĩa
+    )
 
-    # Bước 4: HashingTF
-    # numFeatures là số lượng đặc trưng (kích thước của vector đầu ra)
-    hashing_tf = HashingTF(inputCol=stopwords_remover.getOutputCol(),
-                           outputCol="raw_features",
-                           numFeatures=10000) # Có thể điều chỉnh số lượng features
+    idf = IDF(
+        inputCol="raw_text_features",
+        outputCol="text_features_idf"
+    )
 
-    # Bước 5: IDF
-    idf = IDF(inputCol=hashing_tf.getOutputCol(), outputCol="text_features")
+    numerical_assembler = VectorAssembler(
+        inputCols=numerical_input_cols,
+        outputCol="numerical_vector_features",
+        handleInvalid="skip"
+    )
 
-    # Bước 6: VectorAssembler để kết hợp đặc trưng văn bản và đặc trưng số
-    # Đầu vào là cột text_features (từ IDF) và các cột số được chỉ định
-    assembler_input_cols = [idf.getOutputCol()] + numerical_input_cols
-    vector_assembler = VectorAssembler(inputCols=assembler_input_cols,
-                                       outputCol=output_features_col)
+    label_creator = SQLTransformer(
+        statement=f"""
+            SELECT
+                *,
+                CASE
+                    WHEN open_price IS NOT NULL AND open_price != 0 AND close_price IS NOT NULL THEN
+                        CAST(( (close_price - open_price) / open_price ) * 100.0 AS DOUBLE)
+                    ELSE
+                        NULL
+                END AS {output_label_col}
+            FROM __THIS__
+        """
+    )
 
-    # Tạo Pipeline với tất cả các bước
-    # Lưu ý thứ tự của các bước là quan trọng
-    preprocessing_pipeline = Pipeline(stages=[
-        sql_transformer_label, # Tạo nhãn trước
-        tokenizer,
-        stopwords_remover,
-        hashing_tf,
-        idf,
-        vector_assembler
-    ])
+    assembler_input_cols = []
+    if text_input_col:
+        assembler_input_cols.append("text_features_idf")
+    if numerical_input_cols:
+        assembler_input_cols.append("numerical_vector_features")
 
-    print("Pipeline tiền xử lý đã được tạo.")
+    if not assembler_input_cols:
+        raise ValueError("Không có cột đặc trưng nào được chọn để kết hợp.")
+
+    final_assembler = VectorAssembler(
+        inputCols=assembler_input_cols,
+        outputCol=output_features_col,
+        handleInvalid="skip"
+    )
+
+    preprocessing_stages = []
+    preprocessing_stages.append(label_creator)
+    if text_input_col:
+        preprocessing_stages.extend([regex_tokenizer, stopwords_remover, hashing_tf, idf])
+    if numerical_input_cols:
+        preprocessing_stages.append(numerical_assembler)
+    preprocessing_stages.append(final_assembler)
+
+    preprocessing_pipeline = Pipeline(stages=preprocessing_stages)
+
     return preprocessing_pipeline
 
+
 if __name__ == "__main__":
-    # Phần này dùng để kiểm thử pipeline tiền xử lý
-    # Bạn cần có data_loader.py để chạy phần này
+    from pyspark.sql import SparkSession
+    # Khi chạy trực tiếp, relative import có thể gây lỗi nếu không chạy bằng `python -m src.preprocessing`
+    # Đoạn test này có thể cần điều chỉnh hoặc bỏ qua nếu chỉ tập trung vào việc module được import đúng
     try:
-        from data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
-    except ImportError:
-        print("Không thể import data_loader. Vui lòng đảm bảo nó tồn tại và có thể truy cập.")
-        exit()
+        from config import HASHING_TF_NUM_FEATURES, VIETNAMESE_STOPWORDS
+    except ImportError: # Fallback for direct execution if .config fails
+        print("Running __main__ in preprocessing.py: Falling back on config import for testing.")
+        # Định nghĩa lại các biến config cần thiết cho test nếu không import được
+        HASHING_TF_NUM_FEATURES = 10000
+        VIETNAMESE_STOPWORDS = ["và", "là", "có"]
 
-    spark = get_spark_session("PreprocessingTest")
 
-    # --- Cấu hình đường dẫn (giống như trong data_loader.py) ---
-    prices_path = "../data/prices.csv"
-    articles_path = "../data/articles.csv"
+    spark = SparkSession.builder.appName("PreprocessingTestRegression").master("local[*]").getOrCreate()
 
-    # --- Tải dữ liệu ---
-    prices_df = load_stock_prices(spark, prices_path)
-    articles_df = load_news_articles(spark, articles_path)
+    sample_data = [
+        (1, "2023-01-01", "AAPL", "Giá Apple tăng mạnh sau tin tức tốt", 150.0, 155.0),
+        (2, "2023-01-01", "MSFT", "Microsoft công bố lợi nhuận quý", 250.0, 252.0),
+        (3, "2023-01-02", "AAPL", "Apple đối mặt khó khăn", 154.0, 153.0),
+        (6, "2023-01-03", "TSLA", "Tesla giảm giá", 0.0, 110.0),
+    ]
+    columns = ["id", "date_str", "symbol", "full_article_text", "open_price", "close_price"]
+    data_df = spark.createDataFrame(sample_data, columns)
 
-    if prices_df and articles_df:
-        # Kết hợp dữ liệu
-        # Hàm join_data từ data_loader.py sẽ tạo cột 'full_article_text'
-        raw_data_df = join_data(prices_df, articles_df)
+    preprocessing_pipeline_obj = create_preprocessing_pipeline(
+        text_input_col="full_article_text",
+        numerical_input_cols=["open_price"],
+        output_features_col="features",
+        output_label_col="percentage_change"
+    )
 
-        if raw_data_df:
-            print("\nDữ liệu thô sau khi join:")
-            raw_data_df.show(5, truncate=True)
-            raw_data_df.printSchema()
-
-            # --- Tạo và kiểm thử pipeline tiền xử lý ---
-            # Giả sử cột văn bản là 'full_article_text' và cột số là 'open_price'
-            # Cột nhãn sẽ được pipeline tạo ra là 'label'
-            # Cột đặc trưng cuối cùng sẽ là 'features'
-            pipeline = create_preprocessing_pipeline(
-                text_input_col="full_article_text",
-                numerical_input_cols=["open_price"], # Phải là một list
-                output_features_col="features",
-                output_label_col="label"
-            )
-
-            # Huấn luyện pipeline tiền xử lý trên dữ liệu (chỉ các transformer không yêu cầu huấn luyện trước)
-            # Đối với các Estimator như IDF, chúng cần được fit.
-            print("\nFitting preprocessing pipeline...")
-            # Loại bỏ các hàng có giá trị null trong các cột quan trọng trước khi fit
-            # Ví dụ: cột 'full_article_text', 'open_price', 'close_price'
-            # Cột 'close_price' cần thiết cho SQLTransformer để tạo nhãn
-            columns_to_check_null = ["full_article_text", "open_price", "close_price"]
-            cleaned_data_df = raw_data_df.na.drop(subset=columns_to_check_null)
-
-            if cleaned_data_df.count() == 0:
-                print("Không có dữ liệu sau khi loại bỏ các hàng null. Không thể fit pipeline.")
-            else:
-                print(f"Số lượng mẫu sau khi làm sạch null: {cleaned_data_df.count()}")
-                pipeline_model = pipeline.fit(cleaned_data_df)
-
-                # Áp dụng pipeline đã fit để biến đổi dữ liệu
-                print("\nTransforming data using the fitted pipeline...")
-                processed_df = pipeline_model.transform(cleaned_data_df)
-
-                print("\nDữ liệu sau khi qua pipeline tiền xử lý:")
-                processed_df.printSchema()
-                # Hiển thị các cột quan trọng: nhãn và vector đặc trưng
-                processed_df.select("date", "symbol", "open_price", "close_price", "full_article_text", "label", "features").show(5, truncate=True)
-
-                # Kiểm tra số lượng đặc trưng trong vector 'features'
-                if processed_df.count() > 0:
-                    num_features_in_vector = len(processed_df.select("features").first()[0])
-                    print(f"\nSố lượng đặc trưng trong vector 'features': {num_features_in_vector}")
-        else:
-            print("Không thể join dữ liệu.")
-    else:
-        print("Không thể tải dữ liệu giá hoặc bài báo.")
-
+    transformed_df = preprocessing_pipeline_obj.fit(data_df).transform(data_df)
+    print("Dữ liệu sau khi tiền xử lý (cho hồi quy) từ __main__ preprocessing.py:")
+    transformed_df.select(
+        "id", "symbol", "open_price", "close_price",
+        "percentage_change",
+        "features"
+    ).show(truncate=False)
     spark.stop()
+

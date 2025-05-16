@@ -77,9 +77,9 @@ if __name__ == "__main__":
         # if not SUPABASE_URL or not SUPABASE_KEY:
         #     exit("Thông tin Supabase URL và Key là bắt buộc.")
 
-    TABLE_TO_EXPORT = "stock_data"  # Thay bằng tên bảng bạn muốn xuất
+    TABLE_TO_EXPORT = "article_data"  # Thay bằng tên bảng bạn muốn xuất
     # Thay đổi tên tệp đầu ra thành 'articles.csv'
-    OUTPUT_FILE_PATH = "prices.csv" 
+    OUTPUT_FILE_PATH = "articles.csv" 
 
     if SUPABASE_URL and SUPABASE_KEY and TABLE_TO_EXPORT:
         print(f"Sẽ xuất dữ liệu từ bảng '{TABLE_TO_EXPORT}' ra tệp '{OUTPUT_FILE_PATH}'.")

@@ -1,191 +1,200 @@
 # src/train.py
 
-from pyspark.ml import Pipeline
-from pyspark.ml.classification import LogisticRegression # Ví dụ: sử dụng Logistic Regression
-# Bạn có thể thử các mô hình khác như:
-# from pyspark.ml.classification import RandomForestClassifier, GBTClassifier, NaiveBayes
-from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.ml import Pipeline, PipelineModel
+from pyspark.ml.regression import GBTRegressor
+from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.sql.functions import col
 
-# Import các module cần thiết từ project
+# Import các module cần thiết từ project sử dụng relative import
 try:
-    from data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
-    from preprocessing import create_preprocessing_pipeline # Sử dụng pipeline đã tạo
-except ImportError:
-    print("Lỗi: Không thể import các module data_loader hoặc preprocessing.")
-    print("Hãy đảm bảo các tệp này tồn tại trong thư mục src/ và có thể truy cập.")
-    # Cung cấp giải pháp thay thế đơn giản nếu không tìm thấy
-    from pyspark.sql import SparkSession
-    def get_spark_session(app_name="DefaultApp"):
-        return SparkSession.builder.appName(app_name).master("local[*]").getOrCreate()
-    # Các hàm khác sẽ cần được định nghĩa hoặc import đúng cách
+    from .data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
+    from .preprocessing import create_preprocessing_pipeline
+    # Nếu train.py cần config trực tiếp:
+    # from .config import SOME_TRAIN_CONFIG_PARAM
+except ImportError as e:
+    print(f"Lỗi import trong src/train.py: {e}")
+    # Cung cấp giải pháp thay thế đơn giản nếu không tìm thấy (chỉ cho mục đích gỡ lỗi)
+    # Trong môi trường thực tế, lỗi import ở đây nên được coi là nghiêm trọng
+    if 'get_spark_session' not in locals(): # Kiểm tra một hàm cụ thể
+        def get_spark_session(app_name="DefaultApp"):
+            # Đây là một fallback rất cơ bản, không nên dựa vào nó
+            from pyspark.sql import SparkSession
+            print("Cảnh báo: get_spark_session không được import đúng cách, sử dụng fallback.")
+            return SparkSession.builder.appName(app_name).master("local[*]").getOrCreate()
+    # raise # Ném lại lỗi để dừng nếu cần thiết
 
-def train_model(spark, training_data_df, preprocessing_pipeline_stages):
+
+def train_regression_model(spark, training_data_df, preprocessing_pipeline_stages):
     """
-    Huấn luyện mô hình phân loại sử dụng pipeline tiền xử lý và dữ liệu huấn luyện.
-
-    Args:
-        spark (SparkSession): Đối tượng SparkSession.
-        training_data_df (DataFrame): DataFrame chứa dữ liệu đã được join (giá và bài báo).
-                                      Cần có cột 'open_price', 'close_price', 'full_article_text'.
-        preprocessing_pipeline_stages (list): Danh sách các stage của pipeline tiền xử lý
-                                             (từ create_preprocessing_pipeline).
-
-    Returns:
-        pyspark.ml.PipelineModel: Mô hình Pipeline đã được huấn luyện.
-                                  Trả về None nếu có lỗi.
+    Huấn luyện mô hình hồi quy sử dụng pipeline tiền xử lý và dữ liệu huấn luyện.
     """
     if training_data_df is None:
         print("Dữ liệu huấn luyện là None. Không thể huấn luyện mô hình.")
         return None
 
-    try:
-        # --- 1. Chuẩn bị dữ liệu huấn luyện và kiểm tra ---
-        # Loại bỏ các hàng có giá trị null trong các cột quan trọng
-        # Cột 'close_price' cần thiết cho SQLTransformer (trong preprocessing_pipeline) để tạo nhãn.
-        # 'full_article_text' và 'open_price' là các feature đầu vào.
-        columns_to_check_null = ["full_article_text", "open_price", "close_price"]
-        cleaned_df = training_data_df.na.drop(subset=columns_to_check_null)
+    # Tên cột nhãn thực tế phụ thuộc vào output_label_col trong create_preprocessing_pipeline
+    # Giả sử nó được truyền vào hoặc lấy từ config, ví dụ 'percentage_change'
+    # Để đơn giản, chúng ta sẽ giả định tên cột nhãn là 'percentage_change' nếu không có cách lấy khác
+    # Trong create_preprocessing_pipeline, output_label_col được truyền vào.
+    # Hàm này nhận preprocessing_pipeline_stages, không phải tên cột nhãn trực tiếp.
+    # Chúng ta cần tìm tên cột nhãn từ stages hoặc giả định nó.
+    # Cách tốt nhất là hàm create_preprocessing_pipeline trả về cả stages và tên cột nhãn.
+    # Hoặc, chúng ta tìm SQLTransformer và lấy outputCol của nó.
+    label_col_name = None
+    for stage in reversed(preprocessing_pipeline_stages): # Tìm từ cuối lên
+        if hasattr(stage, 'getOutputCol') and hasattr(stage, 'getStatement'): # Heuristic for SQLTransformer
+             # Kiểm tra xem statement có tạo ra cột nhãn không
+            if "AS " in stage.getStatement().upper() and "FROM __THIS__" in stage.getStatement().upper():
+                 # Lấy tên cột output của SQLTransformer đầu tiên (giả định là label creator)
+                 # Đây là một cách suy đoán, tốt hơn là truyền tên cột nhãn vào.
+                 # Giả sử output_label_col của create_preprocessing_pipeline là tên cột nhãn.
+                 # Cách an toàn hơn: lấy từ featuresCol của GBTRegressor sau này.
+                 # Hiện tại, chúng ta sẽ dựa vào việc GBTRegressor được cấu hình đúng labelCol.
+                 pass # Sẽ lấy từ GBTRegressor sau
+    
+    # Nếu không tìm được, đặt một giá trị mặc định và hy vọng GBTRegressor có labelCol đúng
+    if label_col_name is None:
+        print("Cảnh báo: Không thể tự động xác định tên cột nhãn từ preprocessing_stages. Sẽ dựa vào cấu hình của GBTRegressor.")
+        # label_col_name = "percentage_change" # Hoặc lấy từ config
 
-        if cleaned_df.count() == 0:
-            print("Không có dữ liệu huấn luyện sau khi loại bỏ các hàng null.")
+    try:
+        cleaned_df_for_features = training_data_df.na.drop(subset=["full_article_text", "open_price", "close_price"])
+
+        if cleaned_df_for_features.count() == 0:
+            print("Không có dữ liệu sau khi loại bỏ null ban đầu cho các cột features.")
             return None
 
-        print(f"Số lượng mẫu sau khi làm sạch null để huấn luyện: {cleaned_df.count()}")
+        (train_df_raw, test_df_raw) = cleaned_df_for_features.randomSplit([0.8, 0.2], seed=42)
+        
+        # Lấy tên cột nhãn từ cấu hình của mô hình GBTRegressor sẽ được thêm vào pipeline
+        # Điều này an toàn hơn là cố gắng suy đoán từ các stages tiền xử lý.
+        # Giả sử GBTRegressor sẽ được cấu hình với labelCol chính xác.
+        # Trong ví dụ này, GBTRegressor sẽ dùng labelCol là 'percentage_change' (mặc định hoặc từ config)
 
-        # Chia dữ liệu thành tập huấn luyện và tập kiểm tra
-        # (Ví dụ: 80% huấn luyện, 20% kiểm tra)
-        (train_df, test_df) = cleaned_df.randomSplit([0.8, 0.2], seed=42)
-        print(f"Số lượng mẫu huấn luyện: {train_df.count()}")
-        print(f"Số lượng mẫu kiểm tra: {test_df.count()}")
+        # Tạo mô hình GBTRegressor
+        # Tên cột nhãn phải khớp với những gì create_preprocessing_pipeline tạo ra
+        # và những gì được cấu hình trong main.py (ví dụ: output_label_col_name)
+        # Chúng ta sẽ dùng một tên cố định ở đây, ví dụ 'percentage_change',
+        # và đảm bảo nó nhất quán.
+        gbt_label_col = "percentage_change" # Đảm bảo tên này nhất quán!
+        gbt = GBTRegressor(featuresCol="features", labelCol=gbt_label_col, maxIter=20)
 
-        # --- 2. Định nghĩa mô hình học máy ---
-        # Ví dụ sử dụng Logistic Regression
-        # Cột nhãn đã được tạo bởi SQLTransformer trong preprocessing_pipeline (tên là 'label')
-        # Cột đặc trưng đã được tạo bởi VectorAssembler (tên là 'features')
-        lr = LogisticRegression(featuresCol="features", labelCol="label")
-        # Bạn có thể thử các mô hình khác:
-        # rf = RandomForestClassifier(featuresCol="features", labelCol="label", numTrees=100)
-        # gbt = GBTClassifier(featuresCol="features", labelCol="label", maxIter=10)
-        # nb = NaiveBayes(featuresCol="features", labelCol="label", modelType="multinomial")
+        temp_preprocessing_pipeline = Pipeline(stages=preprocessing_pipeline_stages)
+        
+        print("\nÁp dụng tiền xử lý để tạo nhãn và features cho tập huấn luyện...")
+        # Fit pipeline tiền xử lý trên dữ liệu huấn luyện thô
+        fitted_preprocessing_model = temp_preprocessing_pipeline.fit(train_df_raw)
+        processed_train_df = fitted_preprocessing_model.transform(train_df_raw)
+        
+        final_train_df = processed_train_df.filter(col(gbt_label_col).isNotNull())
+        print(f"Số lượng mẫu huấn luyện sau khi lọc label NULL ({gbt_label_col}): {final_train_df.count()}")
 
-        # --- 3. Tạo Pipeline hoàn chỉnh ---
-        # Kết hợp các bước tiền xử lý với mô hình học máy
-        # preprocessing_pipeline_stages là một list các stages đã được tạo từ create_preprocessing_pipeline
-        # Chúng ta sẽ thêm mô hình học máy (lr) làm stage cuối cùng
-        full_pipeline = Pipeline(stages=preprocessing_pipeline_stages + [lr])
-        # Nếu preprocessing_pipeline_stages đã là một đối tượng Pipeline, bạn có thể lấy stages của nó:
-        # full_pipeline = Pipeline(stages=preprocessing_pipeline_stages.getStages() + [lr])
+        if final_train_df.count() == 0:
+            print(f"Không có dữ liệu huấn luyện sau khi lọc các hàng có nhãn {gbt_label_col} NULL.")
+            return None
+            
+        print(f"\nBắt đầu huấn luyện mô hình GBTRegressor với labelCol='{gbt_label_col}'...")
+        gbt_model = gbt.fit(final_train_df)
+        print("Huấn luyện GBTRegressor hoàn tất.")
 
+        # Kết hợp các stages tiền xử lý đã fit với mô hình GBT đã huấn luyện
+        complete_pipeline_model = PipelineModel(stages=fitted_preprocessing_model.stages + [gbt_model])
+        print("Đã tạo PipelineModel hoàn chỉnh.")
 
-        # --- 4. Huấn luyện Pipeline ---
-        print("\nBắt đầu huấn luyện pipeline hoàn chỉnh...")
-        pipeline_model = full_pipeline.fit(train_df)
-        print("Huấn luyện pipeline hoàn tất.")
-
-        # --- 5. Đánh giá mô hình trên tập kiểm tra ---
         print("\nĐánh giá mô hình trên tập kiểm tra...")
-        predictions_df = pipeline_model.transform(test_df)
+        processed_test_df = fitted_preprocessing_model.transform(test_df_raw) # Dùng lại fitted_preprocessing_model
+        final_test_df = processed_test_df.filter(col(gbt_label_col).isNotNull())
+        
+        if final_test_df.count() == 0:
+            print(f"Không có dữ liệu kiểm tra sau khi lọc các hàng có nhãn {gbt_label_col} NULL. Không thể đánh giá.")
+            return complete_pipeline_model
 
-        # Hiển thị một vài dự đoán
+        predictions_df = gbt_model.transform(final_test_df)
+
         print("\nMột vài dự đoán trên tập kiểm tra:")
-        predictions_df.select("date", "symbol", "open_price", "close_price", "full_article_text", "label", "rawPrediction", "probability", "prediction").show(10, truncate=True)
+        predictions_df.select("date", "symbol", "open_price", "close_price", gbt_label_col, "prediction").show(10, truncate=True)
 
-        # Sử dụng BinaryClassificationEvaluator để đánh giá
-        # Mặc định là AUC ROC nếu không chỉ định metricName
-        evaluator_roc_auc = BinaryClassificationEvaluator(rawPredictionCol="rawPrediction", labelCol="label", metricName="areaUnderROC")
-        roc_auc = evaluator_roc_auc.evaluate(predictions_df)
-        print(f"Area Under ROC (AUC) trên tập kiểm tra: {roc_auc:.4f}")
+        evaluator_rmse = RegressionEvaluator(labelCol=gbt_label_col, predictionCol="prediction", metricName="rmse")
+        rmse = evaluator_rmse.evaluate(predictions_df)
+        print(f"Root Mean Squared Error (RMSE) trên tập kiểm tra: {rmse:.4f}")
 
-        evaluator_pr_auc = BinaryClassificationEvaluator(rawPredictionCol="rawPrediction", labelCol="label", metricName="areaUnderPR")
-        pr_auc = evaluator_pr_auc.evaluate(predictions_df)
-        print(f"Area Under PR (Precision-Recall) trên tập kiểm tra: {pr_auc:.4f}")
+        evaluator_mae = RegressionEvaluator(labelCol=gbt_label_col, predictionCol="prediction", metricName="mae")
+        mae = evaluator_mae.evaluate(predictions_df)
+        print(f"Mean Absolute Error (MAE) trên tập kiểm tra: {mae:.4f}")
+        
+        evaluator_r2 = RegressionEvaluator(labelCol=gbt_label_col, predictionCol="prediction", metricName="r2")
+        r2 = evaluator_r2.evaluate(predictions_df)
+        print(f"R-squared (R2) trên tập kiểm tra: {r2:.4f}")
 
-        # Tính toán Accuracy (Độ chính xác)
-        correct_predictions = predictions_df.filter(col("label") == col("prediction")).count()
-        total_predictions = predictions_df.count()
-        accuracy = (correct_predictions / total_predictions) * 100 if total_predictions > 0 else 0
-        print(f"Accuracy trên tập kiểm tra: {accuracy:.2f}%")
-
-        return pipeline_model
+        return complete_pipeline_model
 
     except Exception as e:
-        print(f"Lỗi trong quá trình huấn luyện mô hình: {e}")
+        print(f"Lỗi trong quá trình huấn luyện mô hình hồi quy: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 def save_model(model, path):
-    """
-    Lưu PipelineModel đã huấn luyện.
-
-    Args:
-        model (PipelineModel): Mô hình PipelineModel cần lưu.
-        path (str): Đường dẫn để lưu mô hình.
-    """
     if model is None:
         print("Mô hình là None. Không thể lưu.")
         return
     try:
         print(f"\nĐang lưu mô hình vào: {path}")
-        model.write().overwrite().save(path) # overwrite() để ghi đè nếu đã tồn tại
+        model.write().overwrite().save(path)
         print("Lưu mô hình thành công.")
     except Exception as e:
         print(f"Lỗi khi lưu mô hình: {e}")
 
 if __name__ == "__main__":
-    # Khởi tạo SparkSession
-    spark = get_spark_session(app_name="StockPrediction_Train")
+    # Khi chạy trực tiếp, relative import có thể gây lỗi nếu không chạy bằng `python -m src.train`
+    # Khối __main__ này chủ yếu để test nhanh, cần cẩn thận với imports.
+    try:
+        # Thử import lại với context là đang chạy file trực tiếp (không phải module)
+        from data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
+        from preprocessing import create_preprocessing_pipeline
+        # from config import TRAIN_PRICES_FILE, TRAIN_ARTICLES_FILE # Nếu cần
+    except ImportError:
+        print("Running __main__ in train.py: Gặp lỗi khi import data_loader/preprocessing trực tiếp cho test.")
+        print("Điều này có thể xảy ra nếu chạy 'python src/train.py' thay vì 'python -m src.train'")
+        # Không thể tiếp tục test nếu các module cơ bản không load được
+        exit(1)
 
-    # --- Cấu hình đường dẫn ---
-    prices_path = "../data/prices.csv" # Dữ liệu giá để huấn luyện
-    articles_path = "../data/articles.csv" # Dữ liệu bài báo để huấn luyện
-    # Đường dẫn để lưu mô hình đã huấn luyện
-    # Thư mục này sẽ được tạo nếu chưa có
-    model_output_path = "../models/stock_prediction_pipeline_model"
 
-    # --- Tải dữ liệu ---
-    prices_df = load_stock_prices(spark, prices_path)
-    articles_df = load_news_articles(spark, articles_path)
+    spark = get_spark_session(app_name="StockPrediction_Train_Regression_Standalone")
+    
+    # Cần định nghĩa các đường dẫn này hoặc import từ config
+    # Ví dụ:
+    # from config import TRAIN_PRICES_FILE, TRAIN_ARTICLES_FILE, SAVED_REGRESSION_MODEL_PATH
+    # Giả sử các file nằm ở thư mục data tương đối với thư mục gốc của project (nơi chứa src)
+    prices_path = "../data/prices.csv"
+    articles_path = "../data/articles.csv"
+    model_output_path = "../models/stock_regression_gbt_pipeline_model_standalone"
 
-    if prices_df and articles_df:
-        # Kết hợp dữ liệu giá và bài báo
-        # Hàm join_data từ data_loader.py sẽ tạo cột 'full_article_text'
-        # và các cột cần thiết như 'open_price', 'close_price'
-        raw_joined_df = join_data(prices_df, articles_df)
+    loaded_prices_df = load_stock_prices(spark, prices_path)
+    loaded_articles_df = load_news_articles(spark, articles_path)
 
-        if raw_joined_df:
-            print("\nDữ liệu đã join để huấn luyện:")
-            raw_joined_df.printSchema()
-            raw_joined_df.show(5, truncate=True)
+    if loaded_prices_df and loaded_articles_df:
+        raw_joined_data_df = join_data(loaded_prices_df, loaded_articles_df)
 
-            # --- Tạo pipeline tiền xử lý ---
-            # Các tham số này nên nhất quán với cách bạn muốn xử lý dữ liệu
-            preprocessing_pipeline_obj = create_preprocessing_pipeline(
+        if raw_joined_data_df:
+            output_label_col_name_test = "percentage_change"
+            preprocessing_pipeline_obj_test = create_preprocessing_pipeline(
                 text_input_col="full_article_text",
                 numerical_input_cols=["open_price"],
                 output_features_col="features",
-                output_label_col="label" # Cột nhãn sẽ được tạo bởi SQLTransformer trong pipeline này
+                output_label_col=output_label_col_name_test
             )
+            preprocessing_stages_test = preprocessing_pipeline_obj_test.getStages()
             
-            # Lấy danh sách các stages từ đối tượng pipeline tiền xử lý
-            preprocessing_stages = preprocessing_pipeline_obj.getStages()
+            trained_model_test = train_regression_model(spark, raw_joined_data_df, preprocessing_stages_test)
 
-
-            # --- Huấn luyện mô hình ---
-            # raw_joined_df chứa các cột cần thiết (open_price, close_price, full_article_text)
-            # mà pipeline tiền xử lý (cụ thể là SQLTransformer) sẽ sử dụng.
-            trained_pipeline_model = train_model(spark, raw_joined_df, preprocessing_stages)
-
-            # --- Lưu mô hình ---
-            if trained_pipeline_model:
-                save_model(trained_pipeline_model, model_output_path)
+            if trained_model_test:
+                save_model(trained_model_test, model_output_path)
             else:
-                print("Huấn luyện mô hình thất bại. Không có mô hình để lưu.")
+                print("Huấn luyện mô hình (standalone test) thất bại.")
         else:
-            print("Không thể join dữ liệu huấn luyện.")
+            print("Không thể join dữ liệu (standalone test).")
     else:
-        print("Không thể tải dữ liệu giá hoặc bài báo để huấn luyện.")
+        print("Không thể tải dữ liệu (standalone test).")
 
-    # Dừng SparkSession
     spark.stop()
