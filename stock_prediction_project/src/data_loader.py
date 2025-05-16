@@ -103,7 +103,7 @@ def load_news_articles(spark, file_path):
             StructField("date", StringType(), True), 
             StructField("link", StringType(), True),
             StructField("title", StringType(), True),
-            StructField("article_text", StringType(), True), # Cột này sẽ được đổi tên thành 'text'
+            StructField("text", StringType(), True), # Cột này sẽ được đổi tên thành 'text'
             StructField("symbol", StringType(), True) 
         ])
         
