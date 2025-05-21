@@ -1,8 +1,8 @@
 # docker-compose.yml
-    
+
 services:
   spark-master:
-    image: bitnami/spark:3.4.1 
+    image: bitnami/spark:3.4.1
     container_name: spark-master
     environment:
       - SPARK_MODE=master
@@ -11,57 +11,134 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
     ports:
-      - '8080:8080' 
-      - '7077:7077' 
+      - '8080:8080' # Spark Master Web UI
+      - '7077:7077' # Spark Master internal communication
     networks:
       - spark-network
-    
+
   spark-worker:
-    image: bitnami/spark:3.4.1 
+    image: bitnami/spark:3.4.1
     container_name: spark-worker-1
     depends_on:
       - spark-master
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=1G 
-      - SPARK_WORKER_CORES=1   
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
     ports:
-      - '8081:8081' 
+      - '8081:8081' # Spark Worker Web UI
     volumes: # Thêm volume mount này cho worker
-      - .:/app  
+      - .:/app
     networks:
       - spark-network
-    
+
   spark-app:
     build:
-      context: . 
-      dockerfile: Dockerfile 
+      context: .
+      dockerfile: Dockerfile
     container_name: spark-app-submitter
     depends_on:
-      - spark-master 
+      - spark-master
+      # Thêm dependency vào Kafka để đảm bảo Kafka chạy trước khi Spark app cần đọc từ nó
+      - kafka
     environment:
-      - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077 
-      - PYTHONUNBUFFERED=1 
+      - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077
+      - PYTHONUNBUFFERED=1
+      # Truyền thông tin Kafka và ES qua biến môi trường (hoặc dùng config file)
+      - KAFKA_BROKER=kafka:9092
+      - NEWS_ARTICLES_TOPIC=news_articles
+      - ELASTICSEARCH_HOST=elasticsearch
+      - ELASTICSEARCH_PORT=9200
+      - ES_PREDICTION_INDEX=stock_predictions
     volumes:
-      - .:/app 
+      - ./models:/app/models
+      - ./data:/app/data # Mount thư mục data để producer có thể đọc file mẫu nếu cần
     networks:
       - spark-network
+    # Command sẽ chạy main.py ở chế độ predict để đọc từ Kafka
     command: >
       sh -c "echo '--- Listing contents of /app (from spark-app) ---' && \
       ls -l /app && \
       echo '--- Listing contents of /app/data (from spark-app) ---' && \
       ls -l /app/data && \
-      echo '--- Attempting to submit Spark job ---' && \
+      echo '--- Attempting to submit Spark job in PREDICT mode ---' && \
+      # Chạy chế độ predict để đọc từ Kafka
       spark-submit \
       --master spark://spark-master:7077 \
       --deploy-mode client \
-      /app/main.py train"
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0 \
+      /app/main.py predict"
+
+  # Service cho Zookeeper (Kafka cần Zookeeper)
+  zookeeper:
+    image: bitnami/zookeeper:3.8.3
+    container_name: zookeeper
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - '2181:2181' # Zookeeper client port
+    networks:
+      - spark-network
+
+  # Service cho Kafka
+  kafka:
+    image: bitnami/kafka:3.5.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - '9092:9092' # Kafka broker port (internal)
+      - '9093:9093' # Kafka broker port (external, for host machine)
+    environment:
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,EXTERNAL://:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093 # Điều chỉnh 'localhost' nếu chạy trên server khác
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 # Chỉ dùng cho môi trường dev/test
+    networks:
+      - spark-network
+
+  # Service cho Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0 # Sử dụng phiên bản tương thích với Spark connector
+    container_name: elasticsearch
+    environment:
+      - xpack.security.enabled=false # Tắt bảo mật cho môi trường dev/test
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m # Giảm bộ nhớ cho môi trường dev/test
+    ports:
+      - '9200:9200' # Elasticsearch HTTP port
+      - '9300:9300' # Elasticsearch Transport port
+    networks:
+      - spark-network
+    volumes:
+      - esdata:/usr/share/elasticsearch/data # Lưu dữ liệu ES
+
+  # Service cho Kibana
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0 # Sử dụng phiên bản khớp với Elasticsearch
+    container_name: kibana
+    depends_on:
+      - elasticsearch
+    ports:
+      - '5601:5601' # Kibana Web UI port
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200 # Kết nối tới Elasticsearch service name
+    networks:
+      - spark-network
+
+# Volumes để lưu trữ dữ liệu Elasticsearch
+volumes:
+  esdata:
+    driver: local
 
 networks:
   spark-network:
     driver: bridge
+
