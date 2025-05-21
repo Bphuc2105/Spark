@@ -1,5 +1,3 @@
-# docker-compose.yml
-
 services:
   spark-master:
     image: bitnami/spark:3.4.1
@@ -44,12 +42,10 @@ services:
     container_name: spark-app-submitter
     depends_on:
       - spark-master
-      # Thêm dependency vào Kafka để đảm bảo Kafka chạy trước khi Spark app cần đọc từ nó
-      - kafka
+      - kafka # Đảm bảo Kafka chạy trước khi Spark app cần đọc từ nó
     environment:
       - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077
       - PYTHONUNBUFFERED=1
-      # Truyền thông tin Kafka và ES qua biến môi trường (hoặc dùng config file)
       - KAFKA_BROKER=kafka:9092
       - NEWS_ARTICLES_TOPIC=news_articles
       - ELASTICSEARCH_HOST=elasticsearch
@@ -58,16 +54,17 @@ services:
     volumes:
       - ./models:/app/models
       - ./data:/app/data # Mount thư mục data để producer có thể đọc file mẫu nếu cần
+      # Thêm volume cho checkpoint location để dữ liệu stream được bền vững
+      - spark_checkpoint:/app/checkpoint
     networks:
       - spark-network
-    # Command sẽ chạy main.py ở chế độ predict để đọc từ Kafka
+    # THAY ĐỔI QUAN TRỌNG: Đặt lệnh chạy predict liên tục làm command mặc định
     command: >
       sh -c "echo '--- Listing contents of /app (from spark-app) ---' && \
       ls -l /app && \
       echo '--- Listing contents of /app/data (from spark-app) ---' && \
       ls -l /app/data && \
-      echo '--- Attempting to submit Spark job in PREDICT mode ---' && \
-      # Chạy chế độ predict để đọc từ Kafka
+      echo '--- Attempting to submit Spark job in PREDICT mode (continuous) ---' && \
       spark-submit \
       --master spark://spark-master:7077 \
       --deploy-mode client \
@@ -106,15 +103,15 @@ services:
 
   # Service cho Elasticsearch
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0 # Sử dụng phiên bản tương thích với Spark connector
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: elasticsearch
     environment:
-      - xpack.security.enabled=false # Tắt bảo mật cho môi trường dev/test
+      - xpack.security.enabled=false
       - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m # Giảm bộ nhớ cho môi trường dev/test
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
     ports:
-      - '9200:9200' # Elasticsearch HTTP port
-      - '9300:9300' # Elasticsearch Transport port
+      - '9200:9200'
+      - '9300:9300'
     networks:
       - spark-network
     volumes:
@@ -122,23 +119,24 @@ services:
 
   # Service cho Kibana
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.11.0 # Sử dụng phiên bản khớp với Elasticsearch
+    image: docker.elastic.co/kibana/kibana:8.11.0
     container_name: kibana
     depends_on:
       - elasticsearch
     ports:
-      - '5601:5601' # Kibana Web UI port
+      - '5601:5601'
     environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200 # Kết nối tới Elasticsearch service name
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
     networks:
       - spark-network
 
-# Volumes để lưu trữ dữ liệu Elasticsearch
+# Volumes để lưu trữ dữ liệu Elasticsearch và Spark Checkpoint
 volumes:
   esdata:
+    driver: local
+  spark_checkpoint: # Volume mới cho Spark Structured Streaming Checkpoint
     driver: local
 
 networks:
   spark-network:
     driver: bridge
-

@@ -130,7 +130,7 @@ def load_news_articles(spark, file_path):
         if "article_text" in articles_df_raw.columns and "text" not in articles_df_raw.columns:
             articles_df_renamed = articles_df_raw.withColumnRenamed("article_text", "text")
         elif "article_text" not in articles_df_raw.columns and "text" not in articles_df_raw.columns:
-            print(f"CẢNH BÁO: Không tìm thấy cột 'article_text' hoặc 'text' trong {file_path}. Sẽ tạo cột 'text' rỗng.")
+            print(f"CẢNH BẢO: Không tìm thấy cột 'article_text' hoặc 'text' trong {file_path}. Sẽ tạo cột 'text' rỗng.")
             articles_df_renamed = articles_df_raw.withColumn("text", lit("").cast(StringType()))
 
         print(f"DEBUG: Chuyển đổi cột 'date' (từ CSV) sang 'date_parsed_temp' cho {file_path}. Spark sẽ cố gắng tự nhận diện định dạng.")
@@ -180,7 +180,7 @@ def join_data(prices_df, articles_df, article_separator=None):
         print("Dữ liệu bài báo là None. Sẽ trả về dữ liệu giá với cột full_article_text rỗng.")
         return prices_df.withColumn("full_article_text", lit("").cast(StringType()))
 
-    separator_to_use = article_separator if article_separator is not None else ARTICLE_SEPARATOR
+    separator_to_use = article_separator if article_separator is not None else config.ARTICLE_SEPARATOR
     try:
         if "text" not in articles_df.columns:
             print("CẢNH BÁO: Cột 'text' không tồn tại trong articles_df khi join_data. Sẽ tạo cột full_article_text rỗng.")
