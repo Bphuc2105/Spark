@@ -9,7 +9,7 @@ from pyspark.sql.functions import col
 
 # Import các module cần thiết từ project
 try:
-    from data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
+    from src.data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
     from preprocessing import create_preprocessing_pipeline # Sử dụng pipeline đã tạo
 except ImportError:
     print("Lỗi: Không thể import các module data_loader hoặc preprocessing.")

@@ -4,7 +4,7 @@ from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
 # Giả sử data_loader.py nằm trong cùng thư mục src hoặc có thể import được
 try:
-    from data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
+    from src.data_loader import get_spark_session, load_stock_prices, load_news_articles, join_data
 except ImportError:
     print("Hãy đảm bảo data_loader.py nằm trong thư mục src/ và có thể import.")
     # Cung cấp một giải pháp thay thế đơn giản nếu không tìm thấy

@@ -1,4 +1,5 @@
 # src/data_loader.py
+# src/data_loader.py
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, to_timestamp
@@ -204,3 +205,4 @@ def join_data(prices_df, articles_df, article_separator=" --- "):
         import traceback
         traceback.print_exc()
         return None
+
