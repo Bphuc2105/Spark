@@ -163,7 +163,7 @@ def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:s
         traceback.print_exc()
         return None
 
-def join_data(prices_df, articles_df, article_separator=" --- "):
+def join_data(prices_df, articles_df, article_separator="<s>"):
     if prices_df is None or articles_df is None:
         print("Không thể kết hợp dữ liệu do một trong các DataFrame đầu vào là None.")
         return None

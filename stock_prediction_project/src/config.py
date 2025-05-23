@@ -23,8 +23,8 @@ PREDICT_ARTICLES_FILE = f"{DATA_DIR}/new_articles.csv"
 SAVED_MODEL_PATH = f"{MODELS_DIR}/stock_prediction_pipeline_model"
 
 # --- Cấu hình tiền xử lý ---
-TEXT_INPUT_COLUMN = "text_feature"
-NUMERICAL_INPUT_COLUMNS = ["number_feature"] 
+TEXT_INPUT_COLUMN = "full_article_text"
+NUMERICAL_INPUT_COLUMNS = ["open_price", "close_price"]
 FEATURES_OUTPUT_COLUMN = "features" 
 LABEL_OUTPUT_COLUMN = "label" 
 
@@ -40,7 +40,7 @@ VIETNAMESE_STOPWORDS = [
     "vào", "ra", "lên", "xuống", "qua", "lại", "từ", "chỉ", "còn", "mới", "rất", "quá",
     "điều", "việc", "người", "cách", "khác", "phải", "luôn", "bao_giờ", "hơn", "nhất"
 ]
-ARTICLE_SEPARATOR = " --- " 
+ARTICLE_SEPARATOR = "<s>" 
 
 # --- Cấu hình huấn luyện mô hình ---
 TRAIN_TEST_SPLIT_RATIO = [0.8, 0.2] 

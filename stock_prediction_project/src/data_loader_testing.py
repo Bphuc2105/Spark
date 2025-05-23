@@ -13,8 +13,9 @@ def get_spark_session_with_nlp(app_name="StockPredictionApp"):
         .master("local[*]") \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
-        .config("spark.jars.packages", "com.johnsnowlabs.nlp:spark-nlp_2.12:5.1.0") \
+        .config("spark.jars.packages", "com.johnsnowlabs.nlp:spark-nlp_2.12:5.1.1") \
         .getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
     return spark
 
 def get_spark_session(app_name="StockPredictionApp"):
@@ -186,7 +187,7 @@ def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd"):
         traceback.print_exc()
         return None
 
-def join_data(prices_df, articles_df, article_separator=" --- "):
+def join_data(prices_df, articles_df, article_separator="<s>"):
     if prices_df is None or articles_df is None:
         print("Không thể kết hợp dữ liệu do một trong các DataFrame đầu vào là None.")
         return None

@@ -1,4 +1,4 @@
 pyspark==3.4.1
 PyYAML==6.0 
 numpy==1.24.4
-spark-nlp==5.1.0
+spark-nlp==5.1.1

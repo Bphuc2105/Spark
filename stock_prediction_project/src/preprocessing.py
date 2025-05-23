@@ -3,19 +3,22 @@
 from pyspark.ml import Pipeline
 from pyspark.ml import Transformer
 from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable
-from pyspark.ml.feature import VectorAssembler, SQLTransformer
+from pyspark.ml.feature import VectorAssembler, SQLTransformer, StringIndexer, HashingTF, Tokenizer
+from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.sql.functions import col, lag, sum as spark_sum, collect_list
 from pyspark.sql.window import Window
 from pyspark.sql.functions import udf, col
-from pyspark.sql.types import StringType
-import sparknlp
-from sparknlp.base import DocumentAssembler, EmbeddingsFinisher
-from sparknlp.annotator import (
-    BertSentenceEmbeddings,
-    SentenceEmbeddings
-)
-from pyspark.ml import Pipeline as SparkNlpPipeline
+from pyspark.sql.types import StringType, ArrayType, DoubleType
 import re
+import hashlib
+import numpy as np
+# import sparknlp
+# from sparknlp.base import DocumentAssembler, EmbeddingsFinisher
+# from sparknlp.annotator import (
+#     BertSentenceEmbeddings,
+#     SentenceEmbeddings
+# )
+from pyspark.ml import Pipeline as SparkNlpPipeline
 
 class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWritable):
     def __init__(self, inputCol="full_article_text", stockCol="stock_code", outputCol="text_feature", stockMap = None):
@@ -37,7 +40,6 @@ class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWrita
         }
 
     def _transform(self, dataset):
-        
         def extract_stock_chunks(article_text, stock_map, context_window=2):
             """Find stock codes in an article and return continuous text chunks containing the mentions and their context.
             
@@ -129,88 +131,130 @@ class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWrita
             
             return results
 
-        def extract_text_feature(full_article_text, symbol):
-            chunks_article = extract_stock_chunks(full_article_text, self.stock_map)
-            selected_chunks = chunks_article.get(symbol, [])
+        def extract_text_feature(full_article_text, symbol, article_separator="<s>"):
+            articles = full_article_text.split(article_separator) # <s> là seperator giữa các article
+            selected_chunks = []
+            for text in articles:
+                chunks_article = extract_stock_chunks(text, self.stock_map)
+                selected_chunks.extend(chunks_article.get(symbol, []))
             return "<chunk>".join(selected_chunks)
         
         extract_udf = udf(extract_text_feature, StringType())
         return dataset.withColumn(self.outputCol, extract_udf(dataset[self.inputCol], dataset[self.stockCol]))
+
+class SimpleTextEmbedder(Transformer, DefaultParamsReadable, DefaultParamsWritable):
+    """Simple text embedder that creates random vectors based on text hash"""
+    def __init__(self, inputCol="text_feature", outputCol="text_embedding", vectorSize=128):
+        super().__init__()
+        self.inputCol = inputCol
+        self.outputCol = outputCol
+        self.vectorSize = vectorSize
+
+    def _transform(self, dataset):
+        def text_to_vector(text):
+            """Convert text to a simple numeric vector using hash-based approach"""
+            if not text or text.strip() == "":
+                # Return zero vector for empty text
+                vector_array = [0.0] * self.vectorSize
+            else:
+                # Use text hash as seed for reproducible random vectors
+                text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+                seed = int(text_hash[:8], 16)
+                np.random.seed(seed)
+                
+                # Generate random vector normalized to unit length
+                vector = np.random.randn(self.vectorSize)
+                vector = vector / np.linalg.norm(vector)
+                vector_array = vector.tolist()
+            
+            # Return as Spark ML Vector (dense vector)
+            return Vectors.dense(vector_array)
+        
+        text_to_vector_udf = udf(text_to_vector, VectorUDT())
+        return dataset.withColumn(self.outputCol, text_to_vector_udf(dataset[self.inputCol]))
     
 def create_preprocessing_pipeline(text_input_col="full_article_text",
                                 numerical_input_cols=["open_price", "close_price"],
+                                symbol_col="symbol",
                                 output_features_col="features",
-                                output_label_col="label"):
+                                output_label_col="label"
+                            ):
     """
-    Tạo một Spark ML Pipeline để tiền xử lý dữ liệu.
-    Pipeline bao gồm:
-    1. Tạo nhãn (sử dụng SQLTransformer cho tính linh hoạt trong pipeline).
-    2. Chunking full_article_text
-    3. Gán embedding
-    4. VectorAssembler: Kết hợp embedding + number input + stock code index.
-
-    Args:
-        text_input_col (str): Tên cột chứa văn bản đầu vào (ví dụ: 'text_feature').
-        numerical_input_cols (list): Danh sách tên các cột đặc trưng số (ví dụ: ['number_feature']).
-        output_features_col (str): Tên cột chứa vector đặc trưng kết hợp cuối cùng.
-        output_label_col (str): Tên cột nhãn.
+    Create Spark ML pipeline for processing stock prediction data.
+    - Generates labels (close - open).
+    - Extracts per-stock chunked text.
+    - Embeds text using simple hash-based vectors (instead of BERT).
+    - Encodes stock symbol as index.
+    - Combines features into a single vector.
 
     Returns:
-        pyspark.ml.Pipeline: Đối tượng Pipeline đã được cấu hình.
+        pyspark.ml.Pipeline
     """
     print("Đang tạo pipeline tiền xử lý...")
-    
 
-    def create_sparknlp_embedding_pipeline(inputCol="text_feature", outputCol="text_embedding"):
-        # Convert raw text to Document type
-        document_assembler = DocumentAssembler() \
-            .setInputCol(inputCol) \
-            .setOutputCol("document")
-
-        # Use pretrained BERT sentence embeddings
-        sentence_embeddings = BertSentenceEmbeddings.pretrained("sent_small_bert_L2_128", "vi") \
-            .setInputCols(["document"]) \
-            .setOutputCol("sentence_embeddings")
-
-        # Convert Spark NLP embeddings to Spark ML-compatible array<float>
-        embeddings_finisher = EmbeddingsFinisher() \
-            .setInputCols(["sentence_embeddings"]) \
-            .setOutputCols([outputCol]) \
-            .setOutputAsVector(True)
-
-        return SparkNlpPipeline(stages=[
-            document_assembler,
-            sentence_embeddings,
-            embeddings_finisher
-        ])
-    # Bước : Tạo nhãn (sử dụng SQLTransformer để tích hợp vào pipeline)
+    # Step 1: Generate label (close - open)
     sql_transformer_label = SQLTransformer(
-        statement=f"SELECT *, (open_price - prev_close_price) AS {output_label_col} FROM __THIS__"
+        statement=f"SELECT *, (close_price - open_price) AS {output_label_col} FROM __THIS__"
     )
+
+    # Step 2: Extract text chunks per stock
     chunk_text_transformer = StockChunkExtractor(
         inputCol=text_input_col,
-        stockCol="symbol",  # Assuming you have this column
+        stockCol=symbol_col,
         outputCol="text_feature"
     )
-    # Step : Spark NLP embedding pipeline
-    nlp_embedding_pipeline = create_sparknlp_embedding_pipeline(
-        inputCol="text_feature",
-        outputCol="text_embedding"
+
+    # Step 3: Encode stock symbol to index
+    symbol_indexer = StringIndexer(
+        inputCol=symbol_col,
+        outputCol="symbol_index",
+        handleInvalid="keep"
     )
-    
 
-    # Bước : VectorAssembler để kết hợp đặc trưng văn bản và đặc trưng số
-    # Đầu vào là cột text_features (từ IDF) và các cột số được chỉ định
-    assembler_input_cols = ["text_embedding"] + numerical_input_cols
-    vector_assembler = VectorAssembler(inputCols=assembler_input_cols,
-                                    outputCol=output_features_col)
+    # Step 4: Simple text embedding (replaces Spark NLP)
+    text_embedder = SimpleTextEmbedder(
+        inputCol="text_feature",
+        outputCol="text_embedding",
+        vectorSize=128  # Smaller vector size for simplicity
+    )
+    # local_model_path = "models/embedding_model"
+    # # Commented out Spark NLP embedding pipeline
+    # def create_sparknlp_embedding_pipeline(inputCol="text_feature", outputCol="text_embedding"):
+    #     document_assembler = DocumentAssembler() \
+    #         .setInputCol(inputCol) \
+    #         .setOutputCol("document")
 
-    # Tạo Pipeline với tất cả các bước
-    # Lưu ý thứ tự của các bước là quan trọng
+    #     sentence_embeddings = BertSentenceEmbeddings.load(local_model_path) \
+    #         .setInputCols(["document"]) \
+    #         .setOutputCol("sentence_embeddings")
+
+    #     embeddings_finisher = EmbeddingsFinisher() \
+    #         .setInputCols(["sentence_embeddings"]) \
+    #         .setOutputCols([outputCol]) \
+    #         .setOutputAsVector(True)
+
+    #     return SparkNlpPipeline(stages=[
+    #         document_assembler,
+    #         sentence_embeddings,
+    #         embeddings_finisher
+    #     ])
+
+    # nlp_embedding_pipeline = create_sparknlp_embedding_pipeline()
+
+    # Step 5: Assemble all features into one vector
+    assembler_input_cols = ["text_embedding", "symbol_index"] + numerical_input_cols
+    vector_assembler = VectorAssembler(
+        inputCols=assembler_input_cols,
+        outputCol=output_features_col
+    )
+
+    # Final pipeline (simplified without Spark NLP stages)
     preprocessing_pipeline = Pipeline(stages=[
-        sql_transformer_label, # Tạo nhãn trước
+        sql_transformer_label,
         chunk_text_transformer,
-        *nlp_embedding_pipeline.getStages(),  # unpack NLP stages
+        symbol_indexer,
+        text_embedder,
+        # *nlp_embedding_pipeline.getStages(),  # Simple text embedder instead of Spark NLP
         vector_assembler
     ])
 
@@ -223,12 +267,14 @@ if __name__ == "__main__":
     # Phần này dùng để kiểm thử pipeline tiền xử lý
     # Bạn cần có data_loader.py để chạy phần này
     try:
-        from data_loader_testing import get_spark_session_with_nlp, load_stock_prices, load_news_articles, join_data
+        # Modified import - removed nlp requirement
+        from data_loader_testing import get_spark_session, load_stock_prices, load_news_articles, join_data
     except ImportError:
         print("Không thể import data_loader. Vui lòng đảm bảo nó tồn tại và có thể truy cập.")
         exit()
 
-    spark = get_spark_session_with_nlp("PreprocessingTest")
+    # Modified to use regular Spark session instead of NLP-enabled one
+    spark = get_spark_session("PreprocessingTest")
 
     # --- Cấu hình đường dẫn (giống như trong data_loader.py) ---
     prices_path = "data/prices.csv"
@@ -260,17 +306,18 @@ if __name__ == "__main__":
             )
             # Huấn luyện pipeline tiền xử lý trên dữ liệu (chỉ các transformer không yêu cầu huấn luyện trước)
             # Đối với các Estimator như IDF, chúng cần được fit.
-            print("\nFitting preprocessing pipeline...")
             # Loại bỏ các hàng có giá trị null trong các cột quan trọng trước khi fit
             # Ví dụ: cột 'full_article_text', 'open_price', 'close_price'
             # Cột 'close_price' cần thiết cho SQLTransformer để tạo nhãn
-            columns_to_check_null = ["text_feature", "number_feature", "prev_open", "prev_close", "open", "close"]
+            columns_to_check_null = ["date", "symbol", "open_price", "close_price", "full_article_text"]
             cleaned_data_df = raw_data_df.na.drop(subset=columns_to_check_null)
 
             if cleaned_data_df.count() == 0:
                 print("Không có dữ liệu sau khi loại bỏ các hàng null. Không thể fit pipeline.")
             else:
                 print(f"Số lượng mẫu sau khi làm sạch null: {cleaned_data_df.count()}")
+                print("\nFitting preprocessing pipeline...")
+                # cleaned_data_df.select("full_article_text").show(1, truncate=False)
                 pipeline_model = pipeline.fit(cleaned_data_df)
 
                 # Áp dụng pipeline đã fit để biến đổi dữ liệu
@@ -280,7 +327,7 @@ if __name__ == "__main__":
                 print("\nDữ liệu sau khi qua pipeline tiền xử lý:")
                 processed_df.printSchema()
                 # Hiển thị các cột quan trọng: nhãn và vector đặc trưng
-                processed_df.select("date", "symbol", "text_feature", "number_feature", "prev_open", "prev_close", "open", "close", "label", "features").show(5, truncate=True)
+                processed_df.select("date", "symbol", "label", "features").show(10, truncate=50)
 
                 # Kiểm tra số lượng đặc trưng trong vector 'features'
                 if processed_df.count() > 0:
