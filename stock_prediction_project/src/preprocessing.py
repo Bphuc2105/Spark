@@ -1,5 +1,6 @@
 # src/preprocessing.py
 
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, VectorAssembler, SQLTransformer, RegexTokenizer
 from pyspark.ml import Pipeline
 from pyspark.ml import Transformer
 from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable
@@ -264,8 +265,9 @@ def create_preprocessing_pipeline(text_input_col="full_article_text",
     
 
 if __name__ == "__main__":
-    # Phần này dùng để kiểm thử pipeline tiền xử lý
-    # Bạn cần có data_loader.py để chạy phần này
+    from pyspark.sql import SparkSession
+    # Khi chạy trực tiếp, relative import có thể gây lỗi nếu không chạy bằng `python -m src.preprocessing`
+    # Đoạn test này có thể cần điều chỉnh hoặc bỏ qua nếu chỉ tập trung vào việc module được import đúng
     try:
         # Modified import - removed nlp requirement
         from data_loader_testing import get_spark_session, load_stock_prices, load_news_articles, join_data

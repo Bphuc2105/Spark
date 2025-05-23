@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     TABLE_TO_EXPORT = "article_data"  # Thay bằng tên bảng bạn muốn xuất
     # Thay đổi tên tệp đầu ra thành 'articles.csv'
-    OUTPUT_FILE_PATH = "data\\articles.csv" 
+    OUTPUT_FILE_PATH = "articles.csv" 
 
     if SUPABASE_URL and SUPABASE_KEY and TABLE_TO_EXPORT:
         print(f"Sẽ xuất dữ liệu từ bảng '{TABLE_TO_EXPORT}' ra tệp '{OUTPUT_FILE_PATH}'.")

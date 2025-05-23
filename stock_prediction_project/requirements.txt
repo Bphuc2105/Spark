@@ -1,4 +1,7 @@
 pyspark==3.4.1
-PyYAML==6.0 
+PyYAML==6.0
 numpy==1.24.4
-spark-nlp==5.1.1
+# Thêm thư viện cho Kafka và Elasticsearch
+kafka-python==2.0.2 # Thư viện Python cho Kafka producer/consumer
+elasticsearch==8.11.0 # Thư viện Python cho Elasticsearch client
+requests==2.31.0
