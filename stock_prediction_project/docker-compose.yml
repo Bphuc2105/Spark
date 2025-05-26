@@ -14,9 +14,11 @@ services:
     networks:
       - spark-network
 
-  spark-worker:
-    image: bitnami/spark:3.4.1
-    container_name: spark-worker-1
+  spark-worker: # Changed from spark-worker to spark-worker-1 to match logs
+    build: # ADDED: Worker will now build from Dockerfile
+      context: .
+      dockerfile: Dockerfile # Assumes the same Dockerfile installs requirements
+    container_name: spark-worker
     depends_on:
       - spark-master
     environment:
@@ -28,21 +30,25 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
+      # Ensure PYTHONPATH is also set for worker if it runs Python processes directly (though Spark usually handles this for executors)
+      # - PYTHONPATH=/app 
     ports:
       - '8081:8081' # Spark Worker Web UI
-    volumes: # Thêm volume mount này cho worker
-      - .:/app
+    volumes: 
+      # This mount makes your project files available at /app inside the worker.
+      # The Dockerfile build process will use files from the context, but this ensures runtime access if needed.
+      - .:/app 
     networks:
       - spark-network
 
   spark-app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile 
     container_name: spark-app-submitter
     depends_on:
       - spark-master
-      - kafka # Đảm bảo Kafka chạy trước khi Spark app cần đọc từ nó
+      - kafka 
     environment:
       - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077
       - PYTHONUNBUFFERED=1
@@ -52,56 +58,58 @@ services:
       - ELASTICSEARCH_PORT=9200
       - ES_PREDICTION_INDEX=stock_predictions
     volumes:
+      # These specific mounts ensure the driver container (spark-app-submitter)
+      # has the latest code from your host, which is good for development.
+      # The build context already copies these, but volumes ensure live updates if you modify code without rebuilding.
+      - ./__init__.py:/app/__init__.py 
+      - ./main.py:/app/main.py       
+      - ./src:/app/src 
       - ./models:/app/models
-      - ./data:/app/data # Mount thư mục data để producer có thể đọc file mẫu nếu cần
-      # Thêm volume cho checkpoint location để dữ liệu stream được bền vững
+      - ./data:/app/data 
       - spark_checkpoint:/app/checkpoint
     networks:
       - spark-network
-    # THAY ĐỔI QUAN TRỌNG: Đặt lệnh chạy predict liên tục làm command mặc định
     command: >
       sh -c "echo '--- Listing contents of /app (from spark-app) ---' && \
       ls -l /app && \
-      echo '--- Listing contents of /app/data (from spark-app) ---' && \
-      ls -l /app/data && \
-      echo '--- Attempting to submit Spark job in PREDICT mode (continuous) ---' && \
+      echo '--- Listing contents of /app/src (from spark-app, mounted from host ./src) ---' && \
+      ls -l /app/src && \
+      echo '--- Attempting to submit Spark job in TRAIN mode with executor PYTHONPATH ---' && \
       spark-submit \
       --master spark://spark-master:7077 \
       --deploy-mode client \
+      --conf spark.executorEnv.PYTHONPATH=/app \
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0 \
-      /app/main.py predict"
+      /app/main.py train"
 
-  # Service cho Zookeeper (Kafka cần Zookeeper)
   zookeeper:
     image: bitnami/zookeeper:3.8.3
     container_name: zookeeper
     environment:
       - ALLOW_ANONYMOUS_LOGIN=yes
     ports:
-      - '2181:2181' # Zookeeper client port
+      - '2181:2181'
     networks:
       - spark-network
 
-  # Service cho Kafka
   kafka:
     image: bitnami/kafka:3.5.1
     container_name: kafka
     depends_on:
       - zookeeper
     ports:
-      - '9092:9092' # Kafka broker port (internal)
-      - '9093:9093' # Kafka broker port (external, for host machine)
+      - '9092:9092' 
+      - '9093:9093' 
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
       - KAFKA_LISTENERS=PLAINTEXT://:9092,EXTERNAL://:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093 # Điều chỉnh 'localhost' nếu chạy trên server khác
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093 
       - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 # Chỉ dùng cho môi trường dev/test
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 
     networks:
       - spark-network
 
-  # Service cho Elasticsearch
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: elasticsearch
@@ -115,9 +123,8 @@ services:
     networks:
       - spark-network
     volumes:
-      - esdata:/usr/share/elasticsearch/data # Lưu dữ liệu ES
+      - esdata:/usr/share/elasticsearch/data 
 
-  # Service cho Kibana
   kibana:
     image: docker.elastic.co/kibana/kibana:8.11.0
     container_name: kibana
@@ -130,11 +137,10 @@ services:
     networks:
       - spark-network
 
-# Volumes để lưu trữ dữ liệu Elasticsearch và Spark Checkpoint
 volumes:
   esdata:
     driver: local
-  spark_checkpoint: # Volume mới cho Spark Structured Streaming Checkpoint
+  spark_checkpoint: 
     driver: local
 
 networks:

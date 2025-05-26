@@ -1,6 +1,6 @@
 # src/preprocessing.py
 
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, VectorAssembler, SQLTransformer, RegexTokenizer
+from pyspark.ml.feature import VectorAssembler, SQLTransformer, RegexTokenizer
 from pyspark.ml import Pipeline
 from pyspark.ml import Transformer
 from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable

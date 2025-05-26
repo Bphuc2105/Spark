@@ -1,5 +1,4 @@
 # src/data_loader.py
-# src/data_loader.py
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, concat_ws, collect_list, lit, from_json, current_timestamp

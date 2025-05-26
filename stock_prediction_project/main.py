@@ -14,9 +14,7 @@ try:
     from src import config
     from src.utils import get_logger
     # Chỉ import những hàm cần thiết cho chế độ train (CSV)
-    from src.data_loader import load_stock_prices, load_news_articles, join_data
-    # Import hàm mới để đọc từ Kafka cho chế độ predict
-    from src.data_loader import read_stream_from_kafka
+    from src.data_loader import load_stock_prices, load_news_articles, join_data, read_stream_from_kafka     # Import hàm mới để đọc từ Kafka cho chế độ predict
     from src.preprocessing import create_preprocessing_pipeline
     from src.train import train_regression_model, save_model
     from src.predict import load_prediction_model, make_predictions, write_stream_to_elasticsearch
