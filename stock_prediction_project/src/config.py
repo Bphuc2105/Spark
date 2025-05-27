@@ -54,7 +54,7 @@ STOCK_PRICES_TOPIC = "stock_prices" # Biến này được tham chiếu trong da
 # --- Cấu hình Elasticsearch ---
 ELASTICSEARCH_HOST = "elasticsearch"
 ELASTICSEARCH_PORT = "9200"
-ES_PREDICTION_INDEX = "stock_predictions"
+ES_PREDICTION_INDEX = "stock_prediction_batch"
 ES_NODES = ELASTICSEARCH_HOST
 # ES_PORT đã có, đảm bảo nhất quán
 
