@@ -1,0 +1,15 @@
+id,date,link,title,text,symbol
+a1,2024-05-01,http://example.com/news/fpt1,"FPT công bố kế hoạch tăng trưởng mới","Tập đoàn FPT hôm nay đã đưa ra chiến lược phát triển cho giai đoạn tới, tập trung vào công nghệ AI và Cloud. Giá cổ phiếu FPT phản ứng tích cực.",FPT
+a2,2024-05-01,http://example.com/news/vcb1,"VCB chia cổ tức cao kỷ lục","Ngân hàng Vietcombank thông báo mức chia cổ tức cao nhất từ trước đến nay, gây bất ngờ cho thị trường. Cổ phiếu VCB tăng trần.",VCB
+a3,2024-05-01,http://example.com/news/fpt_vcb_mix1,"Thị trường chứng khoán biến động nhẹ","Phiên giao dịch hôm nay chứng kiến sự phân hóa, FPT và VCB có những thông tin riêng hỗ trợ giá.",FPT
+a4,2024-05-01,http://example.com/news/fpt_vcb_mix2,"Nhận định thị trường tuần tới","Chuyên gia dự báo FPT có thể tiếp tục đà tăng, VCB cần tích lũy thêm.",VCB
+a5,2024-05-02,http://example.com/news/fpt2,"FPT ký hợp đồng lớn với đối tác Nhật Bản","FPT Software vừa công bố hợp đồng trị giá hàng chục triệu USD với một tập đoàn lớn của Nhật. Điều này củng cố vị thế của FPT.",FPT
+a6,2024-05-02,http://example.com/news/vcb2,"VCB mở rộng mạng lưới chi nhánh","Vietcombank tiếp tục mở thêm các chi nhánh mới tại các tỉnh thành trọng điểm, nhằm nâng cao dịch vụ khách hàng.",VCB
+a7,2024-05-03,http://example.com/news/fpt3,"Tin đồn FPT thâu tóm công ty X","Thị trường đang xôn xao tin đồn FPT chuẩn bị thâu tóm một công ty công nghệ tiềm năng khác. FPT chưa đưa ra bình luận.",FPT
+a8,2024-05-03,http://example.com/news/vcb3,"Lợi nhuận VCB quý 1 vượt kỳ vọng","Vietcombank công bố lợi nhuận quý 1 tăng trưởng ấn tượng, vượt xa dự báo của các công ty chứng khoán.",VCB
+a9,2024-05-04,http://example.com/news/fpt4,"FPT ra mắt sản phẩm AI mới","Sản phẩm trí tuệ nhân tạo mới của FPT được kỳ vọng sẽ mang lại doanh thu đột phá trong năm nay.",FPT
+a10,2024-05-04,http://example.com/news/vcb4,"VCB được nâng hạng tín nhiệm","Một tổ chức xếp hạng tín nhiệm quốc tế vừa nâng hạng cho Vietcombank, phản ánh sức khỏe tài chính vững mạnh.",VCB
+a11,2024-05-01,http://example.com/news/mwg1,"MWG khuyến mãi lớn dịp lễ","Thế Giới Di Động tung ra chương trình khuyến mãi hấp dẫn cho nhiều mặt hàng điện tử và gia dụng.",MWG
+a12,2024-05-02,http://example.com/news/mwg2,"MWG mở thêm chuỗi cửa hàng mới","MWG tiếp tục mở rộng với chuỗi cửa hàng điện máy mới, cạnh tranh trực tiếp với các đối thủ lớn.",MWG
+a13,2024-05-03,http://example.com/news/mwg3,"Cổ phiếu MWG được nhiều quỹ quan tâm","Sau những tín hiệu tích cực từ kết quả kinh doanh, cổ phiếu MWG đang thu hút sự chú ý của các quỹ đầu tư.",MWG
+a14,2024-05-04,http://example.com/news/mwg4,"MWG đẩy mạnh mảng bán hàng online","Doanh thu từ kênh online của MWG tăng trưởng mạnh mẽ, cho thấy sự thích ứng nhanh với xu hướng thị trường.",MWG

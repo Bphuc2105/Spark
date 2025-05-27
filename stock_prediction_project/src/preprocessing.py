@@ -4,29 +4,47 @@ from pyspark.ml.feature import VectorAssembler, SQLTransformer, RegexTokenizer
 from pyspark.ml import Pipeline
 from pyspark.ml import Transformer
 from pyspark.ml.util import DefaultParamsReadable, DefaultParamsWritable
-from pyspark.ml.feature import VectorAssembler, SQLTransformer, StringIndexer, HashingTF, Tokenizer
+# Đảm bảo import các class cần thiết từ pyspark.ml.param.shared
+from pyspark.ml.param.shared import HasInputCol, HasOutputCol, Param, Params, TypeConverters
+
+from pyspark.ml.feature import StringIndexer, HashingTF, Tokenizer, StopWordsRemover, IDF
 from pyspark.ml.linalg import Vectors, VectorUDT
-from pyspark.sql.functions import col, lag, sum as spark_sum, collect_list
-from pyspark.sql.window import Window
-from pyspark.sql.functions import udf, col
-from pyspark.sql.types import StringType, ArrayType, DoubleType
+from pyspark.sql.functions import col, udf # udf được dùng nhiều lần
+from pyspark.sql.types import StringType, ArrayType, DoubleType # Giữ lại các import này
 import re
 import hashlib
 import numpy as np
-# import sparknlp
-# from sparknlp.base import DocumentAssembler, EmbeddingsFinisher
-# from sparknlp.annotator import (
-#     BertSentenceEmbeddings,
-#     SentenceEmbeddings
-# )
-from pyspark.ml import Pipeline as SparkNlpPipeline
+# from pyspark.ml import Pipeline as SparkNlpPipeline # Alias không cần thiết nếu không có xung đột
 
-class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWritable):
-    def __init__(self, inputCol="full_article_text", stockCol="stock_code", outputCol="text_feature", stockMap = None):
-        super().__init__()
-        self.inputCol = inputCol
-        self.stockCol = stockCol
-        self.outputCol = outputCol
+# Import cấu hình
+try:
+    from . import config
+except ImportError:
+    print("Cảnh báo: Không thể import .config trong preprocessing.py, sử dụng giá trị mặc định nếu có fallback.")
+    class FallbackConfig:
+        TEXT_INPUT_COLUMN = "full_article_text"
+        NUMERICAL_INPUT_COLUMNS = ["open_price"]
+        FEATURES_OUTPUT_COLUMN = "features"
+        REGRESSION_LABEL_OUTPUT_COLUMN = "percentage_change"
+        HASHING_TF_NUM_FEATURES = 10000
+        VIETNAMESE_STOPWORDS = ["và", "là", "có", "của", "trong", "cho", "đến", "khi", "thì", "mà", "ở", "tại"]
+        ARTICLE_SEPARATOR = " --- "
+    config = FallbackConfig()
+
+
+class StockChunkExtractor(Transformer, HasInputCol, HasOutputCol, DefaultParamsReadable, DefaultParamsWritable):
+    stockCol = Param(Params._dummy(), "stockCol", "name of the stock symbol column", typeConverter=TypeConverters.toString)
+    outputCol = Param(Params._dummy(), "outputCol", "output column name", typeConverter=TypeConverters.toString)
+    inputCol = Param(Params._dummy(), "inputCol", "input column name", typeConverter=TypeConverters.toString)
+
+    def __init__(self, inputCol="full_article_text", stockCol="symbol", outputCol="relevant_text_chunks", stockMap = None):
+        super(StockChunkExtractor, self).__init__()
+        self._setDefault(inputCol=inputCol, stockCol=stockCol, outputCol=outputCol)
+        # Set các giá trị một cách tường minh để đảm bảo Param được cập nhật
+        self._set(inputCol=inputCol)
+        self._set(stockCol=stockCol) # Quan trọng: stockCol là "symbol"
+        self._set(outputCol=outputCol)
+
         self.stock_map = stockMap or {
             "VCB": ["Vietcombank", "Ngân hàng Vietcombank", "VCB"],
             "CTG": ["VietinBank", "Ngân hàng Công Thương", "Ngân hàng VietinBank", "CTG"],
@@ -40,304 +58,292 @@ class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWrita
             "FPT": ["FPT", "Công ty FPT", "FPT Corporation"],
         }
 
-    def _transform(self, dataset):
-        def extract_stock_chunks(article_text, stock_map, context_window=2):
-            """Find stock codes in an article and return continuous text chunks containing the mentions and their context.
-            
-            Args:
-                article_text: The text of the article to analyze
-                stock_map: Dictionary mapping stock codes to their aliases
-                context_window: Number of sentences before and after to include as context
-                
-            Returns:
-                Dictionary with stock codes as keys and lists of text chunks as values
-            """
-            def extract_sentences(text):
-                """Split text into sentences with improved handling for Vietnamese text."""
-                # Clean the text first
-                text = text.replace('\n', ' ').replace('\r', ' ')
-                text = re.sub(r'\s+', ' ', text).strip()
-                
-                # Common Vietnamese abbreviations to handle
-                abbreviations = [r'TP\.', r'Tp\.', r'TS\.', r'PGS\.', r'ThS\.', r'ĐH\.', 
-                                r'ĐHQG\.', r'TT\.', r'P\.', r'Q\.', r'CT\.', r'CTCP\.', r'UBND\.']
-                
-                # Replace periods in abbreviations temporarily to avoid splitting sentences there
-                for abbr in abbreviations:
-                    text = re.sub(abbr, abbr.replace('.', '<period>'), text)
-                
-                # Split text into sentences
-                # Look for end punctuation followed by space and capital letter or digit
-                pattern = r'([.!?])\s+([A-ZÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÚÙỦŨỤƯỨỪỬỮỰÝỲỶỸỴĐ0-9])'
-                text = re.sub(pattern, r'\1\n\2', text)
-                
-                # Split by newline which now represents sentence boundaries
-                sentences = [s.strip() for s in text.split('\n') if s.strip()]
-                
-                # Restore periods in abbreviations
-                result = []
-                for sentence in sentences:
-                    sentence = sentence.replace('<period>', '.')
-                    result.append(sentence)
-                
-                return result
+    def getInputCol(self):
+        return self.getOrDefault(self.inputCol)
 
-            results = {}
-            sentences = extract_sentences(article_text)
-            
-            # For each stock code, find mentions and extract surrounding chunks
-            for stock_code, aliases in stock_map.items():
-                stock_mention_indices = set()
-                
-                # Find sentences with direct mentions
-                for i, sentence in enumerate(sentences):
-                    sentence_lower = sentence.lower()
-                    for alias in aliases:
-                        pattern = r'\b' + re.escape(alias.lower()) + r'\b'
-                        if re.search(pattern, sentence_lower):
-                            stock_mention_indices.add(i)
-                            break
-                
-                # If we found mentions, extract text chunks
-                if stock_mention_indices:
-                    # Group adjacent mentions together to avoid overlapping chunks
-                    mention_groups = []
-                    current_group = []
-                    
-                    for idx in sorted(stock_mention_indices):
-                        if not current_group or idx <= current_group[-1] + context_window + 1:
-                            # This mention is close to the previous one, add to current group
-                            current_group.append(idx)
-                        else:
-                            # This mention is far from previous ones, start new group
-                            mention_groups.append(current_group)
-                            current_group = [idx]
-                    
-                    if current_group:  # Add the last group
-                        mention_groups.append(current_group)
-                    
-                    # Extract text chunks based on mention groups
-                    stock_chunks = []
-                    for group in mention_groups:
-                        # Determine the chunk boundaries with context
-                        start_idx = max(0, min(group) - context_window)
-                        end_idx = min(len(sentences), max(group) + context_window + 1)
-                        
-                        # Join the sentences to form a continuous chunk
-                        chunk = " ".join(sentences[start_idx:end_idx])
-                        stock_chunks.append(chunk)
-                    
-                    if stock_chunks:
-                        results[stock_code] = stock_chunks
-            
-            return results
+    def getStockCol(self):
+        return self.getOrDefault(self.stockCol)
 
-        def extract_text_feature(full_article_text, symbol, article_separator="<s>"):
-            articles = full_article_text.split(article_separator) # <s> là seperator giữa các article
-            selected_chunks = []
-            for text in articles:
-                chunks_article = extract_stock_chunks(text, self.stock_map)
-                selected_chunks.extend(chunks_article.get(symbol, []))
-            return "<chunk>".join(selected_chunks)
+    def getOutputCol(self):
+        return self.getOrDefault(self.outputCol)
+    
+    def _extract_sentences(self, text):
+        if text is None: return []
+        text = str(text).replace('\n', ' ').replace('\r', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+        abbreviations = [r'TP\.', r'Tp\.', r'TS\.', r'PGS\.', r'ThS\.', r'ĐH\.', 
+                         r'ĐHQG\.', r'TT\.', r'P\.', r'Q\.', r'CT\.', r'CTCP\.', r'UBND\.']
+        for abbr in abbreviations:
+            text = re.sub(abbr, abbr.replace('.', '<period>'), text)
+        pattern = r'([.!?])\s+(?=[A-ZÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÚÙỦŨỤƯỨỪỬỮỰÝỲỶỸỴĐ0-9])'
+        processed_text = re.sub(pattern, r'\1\n', text)
+        sentences = [s.strip() for s in processed_text.split('\n') if s.strip()]
+        result = [s.replace('<period>', '.') for s in sentences]
+        return result
+
+    def _extract_stock_chunks_from_article(self, article_text, stock_code_value, context_window=2):
+        results_for_current_symbol = []
+        if not article_text or not isinstance(article_text, str) or not stock_code_value:
+            return "<chunk>".join(results_for_current_symbol) 
+
+        sentences = self._extract_sentences(article_text)
+        if not sentences: return "<chunk>".join(results_for_current_symbol)
+
+        current_symbol_aliases = self.stock_map.get(str(stock_code_value).upper(), [str(stock_code_value).upper()])
+
+        stock_mention_indices = set()
+        for i, sentence in enumerate(sentences):
+            sentence_lower = sentence.lower()
+            for alias in current_symbol_aliases:
+                if alias and isinstance(alias, str):
+                    pattern = r'\b' + re.escape(alias.lower()) + r'\b'
+                    if re.search(pattern, sentence_lower):
+                        stock_mention_indices.add(i)
+                        break
         
-        extract_udf = udf(extract_text_feature, StringType())
-        return dataset.withColumn(self.outputCol, extract_udf(dataset[self.inputCol], dataset[self.stockCol]))
+        if stock_mention_indices:
+            mention_groups = []
+            sorted_indices = sorted(list(stock_mention_indices))
+            if not sorted_indices:
+                return "<chunk>".join(results_for_current_symbol)
 
-class SimpleTextEmbedder(Transformer, DefaultParamsReadable, DefaultParamsWritable):
-    """Simple text embedder that creates random vectors based on text hash"""
-    def __init__(self, inputCol="text_feature", outputCol="text_embedding", vectorSize=128):
-        super().__init__()
-        self.inputCol = inputCol
-        self.outputCol = outputCol
-        self.vectorSize = vectorSize
+            current_group = [sorted_indices[0]]
+            for i in range(1, len(sorted_indices)):
+                idx = sorted_indices[i]
+                if idx <= current_group[-1] + context_window + 1:
+                    current_group.append(idx)
+                else:
+                    mention_groups.append(current_group)
+                    current_group = [idx]
+            if current_group:
+                mention_groups.append(current_group)
+            
+            for group in mention_groups:
+                if not group: continue
+                start_idx = max(0, min(group) - context_window)
+                end_idx = min(len(sentences), max(group) + context_window + 1)
+                chunk = " ".join(sentences[start_idx:end_idx])
+                results_for_current_symbol.append(chunk)
+        
+        return "<chunk>".join(results_for_current_symbol)
 
     def _transform(self, dataset):
+        input_col_name = self.getInputCol()
+        stock_col_name = self.getStockCol() 
+        output_col_name = self.getOutputCol()
+
+        extract_udf_func = udf(lambda article_text, current_symbol: \
+                               self._extract_stock_chunks_from_article(article_text, current_symbol), StringType())
+        
+        return dataset.withColumn(output_col_name, extract_udf_func(dataset[input_col_name], dataset[stock_col_name]))
+
+
+class SimpleTextEmbedder(Transformer, HasInputCol, HasOutputCol, DefaultParamsReadable, DefaultParamsWritable):
+    """Simple text embedder that creates random vectors based on text hash"""
+    inputCol = Param(Params._dummy(), "inputCol", "input column name", typeConverter=TypeConverters.toString)
+    outputCol = Param(Params._dummy(), "outputCol", "output column name", typeConverter=TypeConverters.toString)
+    vectorSize = Param(Params._dummy(), "vectorSize", "size of the output vector", typeConverter=TypeConverters.toInt)
+
+    def __init__(self, inputCol="text_feature", outputCol="text_embedding", vectorSize=128):
+        super(SimpleTextEmbedder, self).__init__()
+        self._setDefault(inputCol=inputCol, outputCol=outputCol, vectorSize=vectorSize)
+        self._set(inputCol=inputCol)
+        self._set(outputCol=outputCol)
+        self._set(vectorSize=vectorSize)
+
+    def getInputCol(self):
+        return self.getOrDefault(self.inputCol)
+
+    def getOutputCol(self):
+        return self.getOrDefault(self.outputCol)
+
+    def getVectorSize(self):
+        return self.getOrDefault(self.vectorSize)
+
+    def _transform(self, dataset):
+        input_col_name = self.getInputCol()
+        output_col_name = self.getOutputCol()
+        vec_size = self.getVectorSize()
+
         def text_to_vector(text):
-            """Convert text to a simple numeric vector using hash-based approach"""
-            if not text or text.strip() == "":
-                # Return zero vector for empty text
-                vector_array = [0.0] * self.vectorSize
+            if not text or not isinstance(text, str) or text.strip() == "":
+                return Vectors.dense([0.0] * vec_size)
             else:
-                # Use text hash as seed for reproducible random vectors
                 text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
                 seed = int(text_hash[:8], 16)
                 np.random.seed(seed)
-                
-                # Generate random vector normalized to unit length
-                vector = np.random.randn(self.vectorSize)
-                vector = vector / np.linalg.norm(vector)
-                vector_array = vector.tolist()
-            
-            # Return as Spark ML Vector (dense vector)
-            return Vectors.dense(vector_array)
+                vector = np.random.randn(vec_size)
+                norm = np.linalg.norm(vector)
+                if norm == 0: 
+                    return Vectors.dense([0.0] * vec_size)
+                vector = vector / norm
+                return Vectors.dense(vector.tolist())
         
         text_to_vector_udf = udf(text_to_vector, VectorUDT())
-        return dataset.withColumn(self.outputCol, text_to_vector_udf(dataset[self.inputCol]))
-    
-def create_preprocessing_pipeline(text_input_col="full_article_text",
-                                numerical_input_cols=["open_price", "close_price"],
-                                symbol_col="symbol",
-                                output_features_col="features",
-                                output_label_col="label"
-                            ):
-    """
-    Create Spark ML pipeline for processing stock prediction data.
-    - Generates labels (close - open).
-    - Extracts per-stock chunked text.
-    - Embeds text using simple hash-based vectors (instead of BERT).
-    - Encodes stock symbol as index.
-    - Combines features into a single vector.
+        return dataset.withColumn(output_col_name, text_to_vector_udf(dataset[input_col_name]))
 
-    Returns:
-        pyspark.ml.Pipeline
-    """
+    
+def create_preprocessing_pipeline(text_input_col=None,
+                                  numerical_input_cols=None,
+                                  symbol_col=None, # Thêm tham số symbol_col
+                                  output_features_col=None,
+                                  output_label_col=None
+                                ):
+    # Lấy giá trị từ config hoặc dùng giá trị mặc định
+    text_input_col_resolved = text_input_col or getattr(config, 'TEXT_INPUT_COLUMN', 'full_article_text')
+    numerical_input_cols_resolved = numerical_input_cols or getattr(config, 'NUMERICAL_INPUT_COLUMNS', ['open_price'])
+    symbol_col_resolved = symbol_col or "symbol" # Mặc định là "symbol"
+    output_features_col_resolved = output_features_col or getattr(config, 'FEATURES_OUTPUT_COLUMN', 'features')
+    output_label_col_resolved = output_label_col or getattr(config, 'REGRESSION_LABEL_OUTPUT_COLUMN', 'percentage_change')
+
     print("Đang tạo pipeline tiền xử lý...")
 
-    # Step 1: Generate label (close - open)
+    # Step 1: Generate label
     sql_transformer_label = SQLTransformer(
-        statement=f"SELECT *, (close_price - open_price) AS {output_label_col} FROM __THIS__"
+        statement=f"SELECT *, (close_price - open_price) AS {output_label_col_resolved} FROM __THIS__"
     )
 
     # Step 2: Extract text chunks per stock
     chunk_text_transformer = StockChunkExtractor(
-        inputCol=text_input_col,
-        stockCol=symbol_col,
-        outputCol="text_feature"
+        inputCol=text_input_col_resolved,
+        stockCol=symbol_col_resolved, # Sử dụng symbol_col_resolved
+        outputCol="text_feature_chunks" 
     )
 
     # Step 3: Encode stock symbol to index
     symbol_indexer = StringIndexer(
-        inputCol=symbol_col,
+        inputCol=symbol_col_resolved, # Sử dụng symbol_col_resolved
         outputCol="symbol_index",
-        handleInvalid="keep"
+        handleInvalid="keep" 
     )
 
-    # Step 4: Simple text embedding (replaces Spark NLP)
+    # Step 4: Simple text embedding
     text_embedder = SimpleTextEmbedder(
-        inputCol="text_feature",
+        inputCol=chunk_text_transformer.getOutputCol(), 
         outputCol="text_embedding",
-        vectorSize=128  # Smaller vector size for simplicity
+        vectorSize=128 
     )
-    # local_model_path = "models/embedding_model"
-    # # Commented out Spark NLP embedding pipeline
-    # def create_sparknlp_embedding_pipeline(inputCol="text_feature", outputCol="text_embedding"):
-    #     document_assembler = DocumentAssembler() \
-    #         .setInputCol(inputCol) \
-    #         .setOutputCol("document")
-
-    #     sentence_embeddings = BertSentenceEmbeddings.load(local_model_path) \
-    #         .setInputCols(["document"]) \
-    #         .setOutputCol("sentence_embeddings")
-
-    #     embeddings_finisher = EmbeddingsFinisher() \
-    #         .setInputCols(["sentence_embeddings"]) \
-    #         .setOutputCols([outputCol]) \
-    #         .setOutputAsVector(True)
-
-    #     return SparkNlpPipeline(stages=[
-    #         document_assembler,
-    #         sentence_embeddings,
-    #         embeddings_finisher
-    #     ])
-
-    # nlp_embedding_pipeline = create_sparknlp_embedding_pipeline()
+    
+    # Các bước xử lý text truyền thống (Tokenizer, HashingTF, IDF) không còn cần thiết
+    # nếu SimpleTextEmbedder đã tạo ra vector "text_embedding" trực tiếp từ "text_feature_chunks".
+    # Nếu bạn muốn xử lý "text_feature_chunks" bằng Tokenizer, HashingTF, IDF trước khi embedding
+    # hoặc thay thế SimpleTextEmbedder, bạn cần điều chỉnh logic ở đây.
+    # Hiện tại, giả định "text_embedding" là output vector từ SimpleTextEmbedder.
 
     # Step 5: Assemble all features into one vector
-    assembler_input_cols = ["text_embedding", "symbol_index"] + numerical_input_cols
+    assembler_input_cols = [text_embedder.getOutputCol(), symbol_indexer.getOutputCol()]
+    
+    # Chỉ thêm numerical_assembler nếu có cột số được cung cấp
+    stages_to_add_before_final_assembler = []
+    if numerical_input_cols_resolved:
+        numerical_assembler = VectorAssembler(
+            inputCols=numerical_input_cols_resolved,
+            outputCol="numerical_vector_features",
+            handleInvalid="skip" 
+        )
+        stages_to_add_before_final_assembler.append(numerical_assembler)
+        assembler_input_cols.append(numerical_assembler.getOutputCol())
+
+
+    if not assembler_input_cols:
+         raise ValueError("Không có cột đặc trưng nào được chọn cho VectorAssembler cuối cùng.")
+
     vector_assembler = VectorAssembler(
         inputCols=assembler_input_cols,
-        outputCol=output_features_col
+        outputCol=output_features_col_resolved
     )
 
-    # Final pipeline (simplified without Spark NLP stages)
-    preprocessing_pipeline = Pipeline(stages=[
+    # Final pipeline
+    all_stages = [
         sql_transformer_label,
         chunk_text_transformer,
         symbol_indexer,
         text_embedder,
-        # *nlp_embedding_pipeline.getStages(),  # Simple text embedder instead of Spark NLP
-        vector_assembler
-    ])
-
-    print("Pipeline tiền xử lý đã được tạo.")
-    return preprocessing_pipeline
-
+    ]
+    all_stages.extend(stages_to_add_before_final_assembler) 
+    all_stages.append(vector_assembler)
     
+    preprocessing_pipeline = Pipeline(stages=all_stages)
+
+    print("Pipeline tiền xử lý đã được tạo với các stages:")
+    for i, stage in enumerate(all_stages):
+        stage_info = f"  Stage {i}: {stage.__class__.__name__}"
+        try: stage_info += f" | InputCol(s): {stage.getInputCol() if hasattr(stage, 'getInputCol') and callable(stage.getInputCol) else (stage.getInputCols() if hasattr(stage, 'getInputCols') and callable(stage.getInputCols) else 'N/A')}"
+        except: pass 
+        try: stage_info += f" | OutputCol(s): {stage.getOutputCol() if hasattr(stage, 'getOutputCol') and callable(stage.getOutputCol) else (stage.getOutputCols() if hasattr(stage, 'getOutputCols') and callable(stage.getOutputCols) else 'N/A')}"
+        except: pass
+        if isinstance(stage, StockChunkExtractor):
+            try: stage_info += f" | StockCol: {stage.getStockCol()}"
+            except: pass
+        print(stage_info)
+    return preprocessing_pipeline
 
 if __name__ == "__main__":
     from pyspark.sql import SparkSession
-    # Khi chạy trực tiếp, relative import có thể gây lỗi nếu không chạy bằng `python -m src.preprocessing`
-    # Đoạn test này có thể cần điều chỉnh hoặc bỏ qua nếu chỉ tập trung vào việc module được import đúng
-    try:
-        # Modified import - removed nlp requirement
-        from data_loader_testing import get_spark_session, load_stock_prices, load_news_articles, join_data
-    except ImportError:
-        print("Không thể import data_loader. Vui lòng đảm bảo nó tồn tại và có thể truy cập.")
-        exit()
+    from pyspark.sql.types import StructType, StructField # Thêm import này
+    
+    spark = SparkSession.builder.appName("PreprocessingTest").master("local[*]").getOrCreate()
 
-    # Modified to use regular Spark session instead of NLP-enabled one
-    spark = get_spark_session("PreprocessingTest")
+    sample_data_train = [
+        (1.0, "2023-01-01", "FPT", "Giá FPT tăng mạnh. Vietcombank (VCB) cũng có tin tốt.", 150.0, 155.0),
+        (2.0, "2023-01-01", "VCB", "Vietcombank công bố lợi nhuận quý. FPT thì không.", 250.0, 252.0),
+        (3.0, "2023-01-02", "FPT", "Apple đối mặt khó khăn, nhưng FPT vẫn ổn định.", 154.0, 153.0),
+        (4.0, "2023-01-02", "MWG", "Thế Giới Di Động khai trương cửa hàng mới.", 80.0, 81.0),
+        (5.0, "2023-01-03", "FPT", "Không có tin gì về FPT hôm nay", 153.0, 153.0),
+        (6.0, "2023-01-03", "NONAME", "Một công ty ABC nào đó tăng giá", 10.0, 11.0),
+        (7.0, "2023-01-04", "VCB", None, 251.0, 253.0), # Text rỗng
+    ]
+    schema_train = StructType([
+        StructField("id", DoubleType(), True),
+        StructField("date", StringType(), True),
+        StructField("symbol", StringType(), True),
+        StructField("full_article_text", StringType(), True),
+        StructField("open_price", DoubleType(), True),
+        StructField("close_price", DoubleType(), True)
+    ])
+    data_df_train = spark.createDataFrame(sample_data_train, schema_train)
+    print("Dữ liệu huấn luyện mẫu:")
+    data_df_train.show(truncate=False)
 
-    # --- Cấu hình đường dẫn (giống như trong data_loader.py) ---
-    prices_path = "data/prices.csv"
-    articles_path =  "data/articles.csv"
+    pipeline_obj = create_preprocessing_pipeline(
+        text_input_col="full_article_text",
+        numerical_input_cols=["open_price", "close_price"],
+        symbol_col="symbol", # Truyền symbol_col
+        output_features_col="features",
+        output_label_col="label"
+    )
 
-    # --- Tải dữ liệu ---
-    prices_df = load_stock_prices(spark, prices_path)
-    articles_df = load_news_articles(spark, articles_path)
+    columns_to_check_null = ["full_article_text", "symbol", "open_price", "close_price"]
+    cleaned_data_df = data_df_train.na.drop(subset=columns_to_check_null)
 
-    if prices_df and articles_df:
-        # Kết hợp dữ liệu
-        # Hàm join_data từ data_loader.py sẽ tạo cột 'full_article_text'
-        raw_data_df = join_data(prices_df, articles_df)
-
-        if raw_data_df:
-            print("\nDữ liệu thô sau khi join:")
-            raw_data_df.show(5, truncate=True)
-            raw_data_df.printSchema()
-            
-            # --- Tạo và kiểm thử pipeline tiền xử lý ---
-            # Giả sử cột văn bản là 'full_article_text' và cột số là 'open_price'
-            # Cột nhãn sẽ được pipeline tạo ra là 'label'
-            # Cột đặc trưng cuối cùng sẽ là 'features'
-            pipeline = create_preprocessing_pipeline(
-                    text_input_col="full_article_text",
-                    numerical_input_cols=["open_price", "close_price"],
-                    output_features_col="features",
-                    output_label_col="label"
-            )
-            # Huấn luyện pipeline tiền xử lý trên dữ liệu (chỉ các transformer không yêu cầu huấn luyện trước)
-            # Đối với các Estimator như IDF, chúng cần được fit.
-            # Loại bỏ các hàng có giá trị null trong các cột quan trọng trước khi fit
-            # Ví dụ: cột 'full_article_text', 'open_price', 'close_price'
-            # Cột 'close_price' cần thiết cho SQLTransformer để tạo nhãn
-            columns_to_check_null = ["date", "symbol", "open_price", "close_price", "full_article_text"]
-            cleaned_data_df = raw_data_df.na.drop(subset=columns_to_check_null)
-
-            if cleaned_data_df.count() == 0:
-                print("Không có dữ liệu sau khi loại bỏ các hàng null. Không thể fit pipeline.")
-            else:
-                print(f"Số lượng mẫu sau khi làm sạch null: {cleaned_data_df.count()}")
-                print("\nFitting preprocessing pipeline...")
-                # cleaned_data_df.select("full_article_text").show(1, truncate=False)
-                pipeline_model = pipeline.fit(cleaned_data_df)
-
-                # Áp dụng pipeline đã fit để biến đổi dữ liệu
-                print("\nTransforming data using the fitted pipeline...")
-                processed_df = pipeline_model.transform(cleaned_data_df)
-
-                print("\nDữ liệu sau khi qua pipeline tiền xử lý:")
-                processed_df.printSchema()
-                # Hiển thị các cột quan trọng: nhãn và vector đặc trưng
-                processed_df.select("date", "symbol", "label", "features").show(10, truncate=50)
-
-                # Kiểm tra số lượng đặc trưng trong vector 'features'
-                if processed_df.count() > 0:
-                    num_features_in_vector = len(processed_df.select("features").first()[0])
-                    print(f"\nSố lượng đặc trưng trong vector 'features': {num_features_in_vector}")
-        else:
-            print("Không thể join dữ liệu.")
+    if cleaned_data_df.count() == 0:
+        print("Không có dữ liệu sau khi loại bỏ các hàng null. Không thể fit pipeline.")
     else:
-        print("Không thể tải dữ liệu giá hoặc bài báo.")
+        print(f"Số lượng mẫu sau khi làm sạch null: {cleaned_data_df.count()}")
+        print("\nFitting preprocessing pipeline...")
+        try:
+            pipeline_model = pipeline_obj.fit(cleaned_data_df)
+            print("\nTransforming data using the fitted pipeline...")
+            processed_df = pipeline_model.transform(cleaned_data_df)
+            print("\nDữ liệu sau khi qua pipeline tiền xử lý:")
+            processed_df.printSchema()
+            # Hiển thị các cột output của từng bước quan trọng
+            processed_df.select(
+                "date", "symbol", "label", 
+                "text_feature_chunks", # Output của StockChunkExtractor
+                "symbol_index",        # Output của StringIndexer
+                "text_embedding",      # Output của SimpleTextEmbedder
+                # "numerical_vector_features", # Output của numerical_assembler (nếu có)
+                "features"             # Output cuối cùng
+            ).show(truncate=30)
 
+            if processed_df.count() > 0 and "features" in processed_df.columns:
+                first_row_features = processed_df.select("features").first()
+                if first_row_features and first_row_features[0] is not None:
+                    num_features_in_vector = len(first_row_features[0])
+                    print(f"\nSố lượng đặc trưng trong vector 'features': {num_features_in_vector}")
+        except Exception as e:
+            print(f"Lỗi trong quá trình test pipeline: {e}")
+            import traceback
+            traceback.print_exc()
     spark.stop()

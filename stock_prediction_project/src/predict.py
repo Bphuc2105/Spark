@@ -1,23 +1,24 @@
 # src/predict.py
 
-from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType
-from pyspark.sql.functions import col, to_date, lit, current_timestamp
-import traceback
+from pyspark.ml.feature import SQLTransformer # Cần thiết để kiểm tra isinstance
+# from pyspark.sql.functions import current_timestamp # current_timestamp được dùng trong main.py
 
-# Import cấu hình sử dụng absolute import để đảm bảo import đúng module
+# Import cấu hình và logger một cách nhất quán
 try:
-    from src import config
-    ES_PREDICTION_INDEX = config.ES_PREDICTION_INDEX
-    ES_NODES = config.ES_NODES
-    ES_PORT = config.ES_PORT
-except ImportError as e:
-    print(f"Lỗi import config trong predict.py: {e}")
-    print("Cảnh báo: Không thể import cấu hình Elasticsearch trong predict.py, sử dụng giá trị mặc định.")
-    ES_PREDICTION_INDEX = "stock_predictions_fallback" # Fallback
-    ES_NODES = "localhost" # Fallback
-    ES_PORT = "9200" # Fallback
+    from . import config # Sử dụng config cho các hằng số nếu cần
+    from .utils import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    # Fallback logger nếu import thất bại
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger(__name__)
+    # Fallback config nếu cần
+    class FallbackConfigPredict:
+        # REGRESSION_LABEL_OUTPUT_COLUMN = "percentage_change" # Ví dụ nếu cần
+        pass
+    config = FallbackConfigPredict()
 
 
 def load_prediction_model(model_path):
@@ -25,79 +26,54 @@ def load_prediction_model(model_path):
     Tải PipelineModel đã huấn luyện từ đường dẫn được chỉ định.
     """
     try:
-        print(f"Đang tải mô hình từ: {model_path}")
+        logger.info(f"Đang tải mô hình từ: {model_path}")
         model = PipelineModel.load(model_path)
-        print("Tải mô hình thành công.")
+        logger.info("Tải mô hình thành công.")
         return model
     except Exception as e:
-        print(f"Lỗi khi tải mô hình từ {model_path}: {e}")
-        traceback.print_exc()
+        logger.error(f"Lỗi khi tải mô hình từ {model_path}: {e}", exc_info=True)
         return None
 
 def make_predictions(model, data_df):
     """
     Thực hiện dự đoán trên DataFrame đầu vào bằng mô hình đã cho.
-    Hàm này hoạt động với cả Batch và Streaming DataFrame.
+    Hàm này sẽ cố gắng loại bỏ SQLTransformer tạo nhãn (nếu có) khỏi model đã tải.
     """
     if model is None or data_df is None:
-        print("Mô hình hoặc dữ liệu đầu vào là None. Không thể thực hiện dự đoán.")
+        logger.error("Mô hình hoặc dữ liệu đầu vào là None. Không thể thực hiện dự đoán.")
         return None
     try:
-        print("Thực hiện dự đoán trên dữ liệu...")
-        predictions_df = model.transform(data_df)
-        print("Áp dụng mô hình hoàn tất.")
+        logger.info("Hàm make_predictions: Chuẩn bị áp dụng mô hình cho dự đoán...")
+        
+        original_stages = model.stages
+        prediction_model_to_use = model 
+
+        if original_stages and isinstance(original_stages[0], SQLTransformer):
+            logger.info(f"Hàm make_predictions: Mô hình đã tải có {len(original_stages)} stages. Stage đầu tiên là: {type(original_stages[0])}.")
+            # Kiểm tra thêm xem có phải là SQLTransformer tạo label không (ví dụ dựa vào outputCol)
+            # label_col_name_from_config = getattr(config, 'REGRESSION_LABEL_OUTPUT_COLUMN', 'percentage_change')
+            # if original_stages[0].getOutputCol() == label_col_name_from_config:
+            logger.info("Hàm make_predictions: Loại bỏ stage đầu tiên (giả định là SQLTransformer tạo nhãn) cho pipeline dự đoán.")
+            stages_for_prediction = original_stages[1:] 
+            if not stages_for_prediction:
+                logger.error("Hàm make_predictions: Lỗi - Không còn stage nào sau khi loại bỏ stage đầu tiên.")
+                return None
+            prediction_model_to_use = PipelineModel(stages=stages_for_prediction)
+            logger.info(f"Hàm make_predictions: Sử dụng pipeline mới cho dự đoán với {len(stages_for_prediction)} stages.")
+            # else:
+            #     logger.warning(f"Hàm make_predictions: Stage đầu tiên là SQLTransformer nhưng outputCol ('{original_stages[0].getOutputCol()}') không khớp với cột nhãn dự kiến ('{label_col_name_from_config}'). Sử dụng mô hình gốc.")
+        else:
+            logger.warning("Hàm make_predictions: Stage đầu tiên của mô hình đã tải không phải là SQLTransformer hoặc không có stages nào. Sử dụng mô hình gốc.")
+            logger.info("Hàm make_predictions: Điều này có thể gây lỗi nếu 'close_price' vẫn được yêu cầu và dữ liệu không có.")
+
+        logger.info("Hàm make_predictions: Đang thực hiện transform trên dữ liệu đầu vào...")
+        predictions_df = prediction_model_to_use.transform(data_df)
+        logger.info("Hàm make_predictions: Áp dụng mô hình (transform) hoàn tất.")
         return predictions_df
+        
     except Exception as e:
-        print(f"Lỗi trong quá trình áp dụng mô hình: {e}")
-        traceback.print_exc()
+        logger.error(f"Hàm make_predictions: Lỗi trong quá trình áp dụng mô hình: {e}", exc_info=True)
         return None
-
-# --- Hàm mới: Ghi stream ra Elasticsearch ---
-
-def write_stream_to_elasticsearch(streaming_df, es_index, es_host, es_port):
-    """
-    Ghi DataFrame streaming ra Elasticsearch.
-
-    Args:
-        streaming_df (DataFrame): DataFrame streaming chứa kết quả dự đoán.
-        es_index (str): Tên index trong Elasticsearch.
-        es_host (str): Địa chỉ host của Elasticsearch.
-        es_port (str): Port của Elasticsearch.
-
-    Returns:
-        StreamingQuery: Đối tượng StreamingQuery.
-                        Trả về None nếu có lỗi cấu hình hoặc bắt đầu query.
-    """
-    print(f"Đang cấu hình ghi stream ra Elasticsearch index: {es_index} tại {es_host}:{es_port}")
-    try:
-        es_options = {
-            "es.nodes": es_host,
-            "es.port": es_port,
-            "es.resource": es_index,
-            "es.nodes.wan.only": "true",
-            "es.write.operation": "index",
-        }
-
-        checkpoint_dir = "/app/checkpoint/predictions_to_es"
-        print(f"Sử dụng checkpoint location: {checkpoint_dir}")
-
-        streaming_query = streaming_df \
-            .writeStream \
-            .format("org.elasticsearch.spark.sql") \
-            .outputMode("append") \
-            .options(**es_options) \
-            .option("checkpointLocation", checkpoint_dir) \
-            .start()
-
-        print("Streaming query để ghi ra Elasticsearch đã được khởi tạo.")
-        return streaming_query
-
-    except Exception as e:
-        print(f"Lỗi khi cấu hình hoặc bắt đầu ghi stream ra Elasticsearch: {e}")
-        traceback.print_exc()
-        return None
-
 
 if __name__ == "__main__":
-    print("--- Bỏ qua Test Standalone cho predict.py khi tích hợp Kafka/ES ---")
-    print("Vui lòng chạy qua docker-compose và kiểm tra luồng end-to-end.")
+    logger.info("predict.py được chạy trực tiếp (thường chỉ để import).")
