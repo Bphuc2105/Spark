@@ -1,4 +1,3 @@
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, to_timestamp
 from pyspark.sql import functions as F
@@ -6,48 +5,55 @@ import os
 
 def get_spark_session_with_nlp(app_name="StockPredictionApp"):
     """
-    Khởi tạo và trả về một SparkSession có cấu hình Spark NLP.
+    Khởi tạo và trả về một SparkSession có cấu hình Spark NLP và Elasticsearch.
     """
     spark = SparkSession.builder \
         .appName(app_name) \
         .master("local[*]") \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
-        .config("spark.jars.packages", "com.johnsnowlabs.nlp:spark-nlp_2.12:5.1.1") \
+        .config("spark.jars.packages", "com.johnsnowlabs.nlp:spark-nlp_2.12:5.1.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0") \
         .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
 def get_spark_session(app_name="StockPredictionApp"):
     """
-    Khởi tạo và trả về một SparkSession.
+    Khởi tạo và trả về một SparkSession với Elasticsearch connector.
     """
     spark = SparkSession.builder \
         .appName(app_name) \
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
+        .config("spark.jars.packages", "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0") \
         .getOrCreate()
     return spark
 
-def load_stock_prices(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:ssX"):
+def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="prices", 
+                     date_format_in_file="yyyy-MM-dd HH:mm:ssX"):
     """
-    Tải dữ liệu giá cổ phiếu từ tệp CSV.
+    Tải dữ liệu giá cổ phiếu từ Elasticsearch index.
     Xử lý các tên cột và chuyển đổi cột ngày.
-    Tệp CSV đầu vào được mong đợi có header.
-    Schema suy luận từ log: id, create_date (hoặc time), close, volume, source, symbol, open
+    Schema mong đợi: id, create_date (hoặc time), close, volume, source, symbol, open
     """
-    # Get the directory of the current script (data_loader.py)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Get the project root directory (parent of 'src')
-    project_root = os.path.dirname(script_dir)
-    
-    absolute_file_path = os.path.join(project_root, file_path)
     try:
-        print(f"Đang thử tải dữ liệu giá từ (với inferSchema, đường dẫn tuyệt đối): {absolute_file_path}")
-        prices_df = spark.read.csv(absolute_file_path, header=True, inferSchema=True, escape="\"")
+        print(f"Đang thử tải dữ liệu giá từ Elasticsearch: {es_host}:{es_port}/{es_index}")
+        
+        # Cấu hình Elasticsearch
+        es_options = {
+            "es.nodes": es_host,
+            "es.port": es_port,
+            "es.resource": es_index,
+            "es.read.field.as.array.include": "tags",
+            "es.nodes.wan.only": "true"
+        }
+        
+        # Đọc dữ liệu từ Elasticsearch
+        prices_df = spark.read.format("org.elasticsearch.spark.sql") \
+                              .options(**es_options) \
+                              .load()
 
-        print("Schema của prices_df sau khi inferSchema:")
+        print("Schema của prices_df sau khi đọc từ Elasticsearch:")
         prices_df.printSchema()
 
         # Đổi tên cột 'open' và 'close' nếu chúng tồn tại và chưa đúng tên
@@ -59,7 +65,7 @@ def load_stock_prices(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:ss
         date_col_source = None
         date_col_final_name = "date"
 
-        # Ưu tiên các tên cột ngày có thể có trong file prices.csv
+        # Ưu tiên các tên cột ngày có thể có trong Elasticsearch index
         if "create_date" in prices_df.columns:
             date_col_source = "create_date"
             print(f"Sử dụng cột '{date_col_source}' để tạo cột '{date_col_final_name}' cho prices_df.")
@@ -73,7 +79,7 @@ def load_stock_prices(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:ss
             prices_df = prices_df.withColumn(date_col_final_name, to_date(col(date_col_source), "yyyy-MM-dd")) 
         elif "date" in prices_df.columns and str(prices_df.schema["date"].dataType) != "DateType()":
             date_col_source = "date" 
-            print(f"Cột 'date' trong {absolute_file_path} không phải DateType, đang thử chuyển đổi từ string...")
+            print(f"Cột 'date' trong Elasticsearch index không phải DateType, đang thử chuyển đổi từ string...")
             prices_df = prices_df.withColumn("date_temp_col", to_date(col("date").cast("string"), "yyyy-MM-dd"))
             if "date_temp_col" in prices_df.columns:
                 prices_df = prices_df.drop("date").withColumnRenamed("date_temp_col", date_col_final_name)
@@ -85,7 +91,7 @@ def load_stock_prices(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:ss
             if "date" != date_col_final_name : 
                  prices_df = prices_df.withColumnRenamed("date", date_col_final_name) 
         else:
-             print(f"LỖI: Không tìm thấy cột ngày phù hợp ('create_date', 'time', 'date_str', hoặc 'date') trong {absolute_file_path}")
+             print(f"LỖI: Không tìm thấy cột ngày phù hợp ('create_date', 'time', 'date_str', hoặc 'date') trong Elasticsearch index {es_index}")
              prices_df.printSchema()
              return None
         
@@ -100,47 +106,53 @@ def load_stock_prices(spark, file_path, date_format_in_file="yyyy-MM-dd HH:mm:ss
             
         prices_df = prices_df.select(*required_cols) 
         
-        print(f"Đã tải và xử lý dữ liệu giá từ: {absolute_file_path}")
+        print(f"Đã tải và xử lý dữ liệu giá từ Elasticsearch index: {es_index}")
         prices_df.printSchema()
         print(f"Số lượng dòng trong prices_df: {prices_df.count()}") 
         prices_df.show(5, truncate=False)
         return prices_df
     except Exception as e:
-        print(f"Lỗi khi tải dữ liệu giá từ {absolute_file_path}: {e}")
+        print(f"Lỗi khi tải dữ liệu giá từ Elasticsearch index {es_index}: {e}")
         import traceback
         traceback.print_exc()
         return None
 
-def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd"):
+def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="articles", 
+                      date_format_in_file="yyyy-MM-dd"):
     """
-    Tải dữ liệu bài báo từ tệp CSV.
+    Tải dữ liệu bài báo từ Elasticsearch index.
     Xử lý cột ngày và cột text. Cột 'symbol' không còn được yêu cầu.
-    Tệp CSV đầu vào được mong đợi có header.
-    Schema suy luận từ log: id, date, link, article_text, title
+    Schema mong đợi: id, date, link, article_text, title
     """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Get the project root directory (parent of 'src')
-    project_root = os.path.dirname(script_dir)
-    
-    absolute_file_path = os.path.join(project_root, file_path)
     try:
-        print(f"Đang thử tải dữ liệu bài báo từ (với inferSchema, đường dẫn tuyệt đối): {absolute_file_path}")
-        articles_df = spark.read.csv(absolute_file_path, header=True, inferSchema=True, multiLine=True, escape="\"")
+        print(f"Đang thử tải dữ liệu bài báo từ Elasticsearch: {es_host}:{es_port}/{es_index}")
         
-        print("Schema của articles_df sau khi inferSchema:")
+        # Cấu hình Elasticsearch
+        es_options = {
+            "es.nodes": es_host,
+            "es.port": es_port,
+            "es.resource": es_index,
+            "es.read.field.as.array.include": "tags",
+            "es.nodes.wan.only": "true"
+        }
+        
+        # Đọc dữ liệu từ Elasticsearch
+        articles_df = spark.read.format("org.elasticsearch.spark.sql") \
+                                .options(**es_options) \
+                                .load()
+        
+        print("Schema của articles_df sau khi đọc từ Elasticsearch:")
         articles_df.printSchema()
 
         date_col_final_name = "date"
         # Xử lý cột ngày:
-        # Tệp CSV của bạn dường như đã có cột 'date' (nhưng là string)
         if date_col_final_name in articles_df.columns:
             if str(articles_df.schema[date_col_final_name].dataType) != "DateType()":
-                print(f"Cột '{date_col_final_name}' trong articles.csv là StringType, đang chuyển đổi sang DateType...")
-                # Giả sử định dạng ngày trong cột 'date' của articles.csv là một timestamp string có thể parse được
+                print(f"Cột '{date_col_final_name}' trong Elasticsearch index là StringType, đang chuyển đổi sang DateType...")
+                # Giả sử định dạng ngày trong cột 'date' của Elasticsearch index là một timestamp string có thể parse được
                 articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col(date_col_final_name), date_format_in_file))) 
             else: # Đã là DateType
-                print(f"Cột '{date_col_final_name}' trong articles.csv đã là DateType.")
+                print(f"Cột '{date_col_final_name}' trong Elasticsearch index đã là DateType.")
                 # Đảm bảo tên cột là 'date' nếu nó đã là DateType nhưng có tên khác (ít khả năng)
                 if date_col_final_name != "date": 
                     articles_df = articles_df.withColumnRenamed(date_col_final_name, "date")
@@ -149,7 +161,7 @@ def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd"):
              articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col("create_date"), date_format_in_file)))
              if "create_date" != date_col_final_name: articles_df = articles_df.drop("create_date")
         else: # Nếu không có cả 'date' lẫn 'create_date'
-            print(f"LỖI: Không tìm thấy cột ngày phù hợp ('date' hoặc 'create_date') trong {absolute_file_path}.")
+            print(f"LỖI: Không tìm thấy cột ngày phù hợp ('date' hoặc 'create_date') trong Elasticsearch index {es_index}.")
             return None 
 
         text_col_final_name = "article_text"
@@ -158,7 +170,7 @@ def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd"):
                 articles_df = articles_df.withColumnRenamed("text", text_col_final_name)
                 print("Đã đổi tên cột 'text' thành 'article_text'.")
             else:
-                 print(f"LỖI: Không tìm thấy cột '{text_col_final_name}' hoặc 'text' trong {absolute_file_path}.")
+                 print(f"LỖI: Không tìm thấy cột '{text_col_final_name}' hoặc 'text' trong Elasticsearch index {es_index}.")
                  return None
         else: # Cột article_text đã tồn tại
             if "article_text" != text_col_final_name: # Đảm bảo tên cuối cùng
@@ -176,18 +188,21 @@ def load_news_articles(spark, file_path, date_format_in_file="yyyy-MM-dd"):
 
         articles_df = articles_df.select(*final_selected_cols)
 
-        print(f"Đã tải và xử lý dữ liệu bài báo từ: {absolute_file_path}")
+        print(f"Đã tải và xử lý dữ liệu bài báo từ Elasticsearch index: {es_index}")
         articles_df.printSchema()
         print(f"Số lượng dòng trong articles_df (sau xử lý): {articles_df.count()}") 
         articles_df.show(5, truncate=True)
         return articles_df
     except Exception as e:
-        print(f"Lỗi khi tải dữ liệu bài báo từ {absolute_file_path}: {e}")
+        print(f"Lỗi khi tải dữ liệu bài báo từ Elasticsearch index {es_index}: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 def join_data(prices_df, articles_df, article_separator="<s>"):
+    """
+    Kết hợp dữ liệu giá cổ phiếu và bài báo đã được tải từ Elasticsearch.
+    """
     if prices_df is None or articles_df is None:
         print("Không thể kết hợp dữ liệu do một trong các DataFrame đầu vào là None.")
         return None
@@ -229,22 +244,51 @@ def join_data(prices_df, articles_df, article_separator="<s>"):
         import traceback
         traceback.print_exc()
         return None
-    
-if __name__ == "__main__":
-    # --- Cấu hình đường dẫn (giống như trong data_loader.py) ---
-    spark = get_spark_session("DataLoading")
-    prices_path = "data/prices.csv"
-    articles_path = "data/articles.csv"
 
-    # --- Tải dữ liệu ---
-    prices_df = load_stock_prices(spark, prices_path)
-    articles_df = load_news_articles(spark, articles_path)
+def configure_elasticsearch_connection(spark, es_host="localhost", es_port="9200", 
+                                     es_user=None, es_password=None, es_ssl=False):
+    """
+    Cấu hình kết nối Elasticsearch cho Spark session.
+    """
+    spark.conf.set("es.nodes", es_host)
+    spark.conf.set("es.port", es_port)
+    spark.conf.set("es.nodes.wan.only", "true")
+    
+    if es_user and es_password:
+        spark.conf.set("es.net.http.auth.user", es_user)
+        spark.conf.set("es.net.http.auth.pass", es_password)
+    
+    if es_ssl:
+        spark.conf.set("es.net.ssl", "true")
+        spark.conf.set("es.net.ssl.cert.allow.self.signed", "true")
+    
+    print(f"Đã cấu hình kết nối Elasticsearch: {es_host}:{es_port}")
+
+if __name__ == "__main__":
+    # --- Cấu hình Elasticsearch ---
+    ES_HOST = "localhost"
+    ES_PORT = "9200"
+    ES_USER = None  # Đặt username nếu cần xác thực
+    ES_PASSWORD = None  # Đặt password nếu cần xác thực
+    ES_SSL = False  # Đặt True nếu sử dụng HTTPS
+    
+    # --- Khởi tạo Spark session ---
+    spark = get_spark_session("ElasticsearchDataLoading")
+    
+    # --- Cấu hình kết nối Elasticsearch ---
+    configure_elasticsearch_connection(spark, ES_HOST, ES_PORT, ES_USER, ES_PASSWORD, ES_SSL)
+    
+    # --- Tải dữ liệu từ Elasticsearch ---
+    prices_df = load_stock_prices(spark, ES_HOST, ES_PORT, "prices")
+    articles_df = load_news_articles(spark, ES_HOST, ES_PORT, "articles")
 
     if prices_df and articles_df:
         # Kết hợp dữ liệu
-        # Hàm join_data từ data_loader.py sẽ tạo cột 'full_article_text'
         raw_data_df = join_data(prices_df, articles_df)
         if raw_data_df:
-            print("\nDữ liệu thô sau khi join:")
+            print("\nDữ liệu thô sau khi join từ Elasticsearch:")
             raw_data_df.show(5, truncate=True)
             raw_data_df.printSchema()
+    
+    # Đóng Spark session
+    spark.stop()

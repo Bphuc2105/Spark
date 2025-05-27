@@ -1,4 +1,4 @@
-﻿id,time,close,volume,source,symbol,open
+﻿id,date,close,volume,source,symbol,open
 1,2024-01-02,55.85,1788420,VCI,VCB,55.45
 2,2024-01-03,56.52,1374590,VCI,VCB,55.85
 3,2024-01-04,57.46,2660779,VCI,VCB,56.52

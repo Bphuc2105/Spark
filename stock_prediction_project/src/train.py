@@ -120,65 +120,104 @@ def train_regression_model(spark, training_data_df, preprocessing_pipeline_stage
 
 def save_model(model, path):
     """
-    Lưu PipelineModel đã huấn luyện vào file zip.
+    Lưu PipelineModel đã huấn luyện vào file zip một cách an toàn, tránh race conditions.
+
     Returns:
         bool: True if saving was successful, False otherwise.
     """
     if model is None:
         print("Mô hình là None. Không thể lưu.")
         return False
+    if not isinstance(model, PipelineModel):
+        print(f"Đối tượng cung cấp không phải là PipelineModel (type: {type(model)}). Không thể lưu.")
+        return False
+
+    # Chuyển đổi đường dẫn thành đường dẫn tuyệt đối cho file zip cuối cùng
+    abs_zip_path = os.path.abspath(path)
+    if not abs_zip_path.endswith('.zip'):
+        abs_zip_path = abs_zip_path + '.zip'
+
+    # Tạo một thư mục tạm thời CỐ ĐỊNH để Spark lưu model vào.
+    # Chúng ta sẽ tự xóa nó sau khi hoàn tất.
+    model_dir_container = os.path.dirname(abs_zip_path)
+    temp_save_dir = os.path.join(model_dir_container, "temp_spark_model_save")
+
+    print(f"\n--- Bắt đầu quy trình lưu model an toàn ---")
+    print(f"- Đường dẫn file zip cuối cùng: {abs_zip_path}")
+    print(f"- Thư mục lưu model tạm thời: {temp_save_dir}")
+
+    # Xóa thư mục tạm thời cũ nếu nó tồn tại để bắt đầu mới
+    if os.path.exists(temp_save_dir):
+        print(f"Xóa thư mục tạm thời cũ: {temp_save_dir}")
+        shutil.rmtree(temp_save_dir)
+
     try:
-        # Chuyển đổi đường dẫn thành đường dẫn tuyệt đối
-        abs_path = os.path.abspath(path)
-        
-        # Thêm phần mở rộng .zip nếu chưa có
-        if not abs_path.endswith('.zip'):
-            abs_path = abs_path + '.zip'
-            
-        model_dir = os.path.dirname(abs_path)
-        
-        print(f"\nThông tin lưu mô hình:")
-        print(f"- Đường dẫn tương đối: {path}")
-        print(f"- Đường dẫn tuyệt đối: {abs_path}")
-        print(f"- Thư mục chứa: {model_dir}")
-        
-        print(f"\nĐang tạo thư mục: {model_dir}")
-        os.makedirs(model_dir, exist_ok=True)
-        
-        # Kiểm tra quyền ghi
-        if not os.access(model_dir, os.W_OK):
-            print(f"Không có quyền ghi vào thư mục: {model_dir}")
+        # Bước 1: Spark lưu model vào thư mục cố định.
+        # Hành động này là blocking và sẽ đợi cho đến khi các job của Spark hoàn tất.
+        print(f"\nBước 1: Spark đang lưu model vào thư mục tạm thời...")
+        model.write().overwrite().save(temp_save_dir)
+        print("Spark đã hoàn tất việc ghi model.")
+
+        # Bước 2: Kiểm tra để chắc chắn rằng thư mục không rỗng.
+        print(f"\nBước 2: Kiểm tra nội dung của thư mục tạm thời...")
+        if not os.path.exists(temp_save_dir) or not os.listdir(temp_save_dir):
+            print(f"LỖI: Thư mục lưu model tạm thời '{temp_save_dir}' rỗng hoặc không tồn tại sau khi Spark lưu!")
             return False
-            
-        print(f"\nĐang lưu mô hình...")
-        print(f"Loại mô hình: {type(model)}")
-        print(f"Số lượng stages: {len(model.stages)}")
         
-        # Tạo thư mục tạm thời để lưu mô hình
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Lưu mô hình vào thư mục tạm thời
-            temp_model_path = os.path.join(temp_dir, "model")
-            model.write().overwrite().save(temp_model_path)
-            
-            # Tạo file zip
-            with zipfile.ZipFile(abs_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Thêm tất cả các file từ thư mục tạm thời vào zip
-                for root, dirs, files in os.walk(temp_model_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, temp_model_path)
-                        zipf.write(file_path, arcname)
-        
-        # Kiểm tra xem file zip đã được tạo thành công chưa
-        if os.path.exists(abs_path):
-            print(f"Mô hình đã được lưu thành công tại: {abs_path}")
-            print(f"Kích thước file: {os.path.getsize(abs_path) / 1024 / 1024:.2f} MB")
+        # In ra một vài file để xác nhận
+        print("Nội dung ví dụ trong thư mục tạm thời:")
+        for item in os.listdir(temp_save_dir)[:5]:
+            print(f"  - {item}")
+
+
+        # Bước 3: Nén thư mục đã được lưu hoàn chỉnh.
+        print(f"\nBước 3: Nén nội dung vào file zip '{abs_zip_path}'...")
+        with zipfile.ZipFile(abs_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(temp_save_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, temp_save_dir)
+                    zipf.write(file_path, arcname)
+        print("Nén file zip hoàn tất.")
+
+        # Bước 4: Kiểm tra file zip cuối cùng
+        if os.path.exists(abs_zip_path) and os.path.getsize(abs_zip_path) > 1024: # Kiểm tra > 1KB
+            print(f"\nTHÀNH CÔNG: Mô hình đã được lưu tại: {abs_zip_path}")
+            print(f"Kích thước file: {os.path.getsize(abs_zip_path) / (1024 * 1024):.2f} MB")
+            return True
         else:
-            print(f"Lỗi: Không tìm thấy file zip tại {abs_path}")
+            print(f"\nLỖI: File zip cuối cùng bị rỗng hoặc không tạo được.")
+            print(f"Kích thước file: {os.path.getsize(abs_zip_path) if os.path.exists(abs_zip_path) else 'N/A'}")
             return False
-            
-        return True
+
     except Exception as e:
-        print(f"Lỗi khi lưu mô hình vào {path}: {e}")
+        print(f"Lỗi xảy ra trong quá trình lưu model: {e}")
         traceback.print_exc()
         return False
+    finally:
+        # Bước 5: Dọn dẹp thư mục tạm thời.
+        # Khối finally này sẽ luôn chạy, dù có lỗi hay không.
+        if os.path.exists(temp_save_dir):
+            print(f"\nBước 5: Dọn dẹp, xóa thư mục tạm thời '{temp_save_dir}'.")
+            shutil.rmtree(temp_save_dir)
+        print("--- Kết thúc quy trình lưu model ---")
+
+if __name__ == "__main__":
+    from pyspark.ml import Pipeline
+    from pyspark.ml.feature import Tokenizer
+    from pyspark.sql import SparkSession
+
+    from data_loader import get_spark_session
+    
+    # Create a Spark session
+    spark = get_spark_session("Test")
+    # Dummy data
+    df = spark.createDataFrame([(1, "Hello world")], ["id", "text"])
+
+    # Minimal pipeline
+    tokenizer = Tokenizer(inputCol="text", outputCol="words")
+    pipeline = Pipeline(stages=[tokenizer])
+    model = pipeline.fit(df)
+    result = save_model(model, "test_model.zip")
+    print("Save result:", result)
+        

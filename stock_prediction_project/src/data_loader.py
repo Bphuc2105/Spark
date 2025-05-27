@@ -1,9 +1,9 @@
 # src/data_loader.py
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, concat_ws, collect_list, lit, from_json, current_timestamp
+from pyspark.sql.functions import col, to_date, from_json, to_timestamp
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, DateType, TimestampType
-import json
+from pyspark.sql import functions as F
 import traceback
 
 # Import cấu hình sử dụng absolute import để đảm bảo import đúng module
@@ -22,189 +22,251 @@ except ImportError as e:
     STOCK_PRICES_TOPIC = "stock_prices" # Fallback
 
 
-def get_spark_session(app_name="StockPredictionPySpark"):
+def get_spark_session(app_name="StockPredictionApp"):
+    """
+    Khởi tạo và trả về một SparkSession với Elasticsearch connector.
+    """
     spark = SparkSession.builder \
         .appName(app_name) \
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
+        .config("spark.jars.packages", "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0") \
         .getOrCreate()
     return spark
 
-# Giữ nguyên hàm load_stock_prices và load_news_articles để dùng cho chế độ training từ CSV
-def load_stock_prices(spark, file_path, date_format="yyyy-MM-dd"):
+def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="prices", 
+                     date_format_in_file="yyyy-MM-dd HH:mm:ssX"):
+    """
+    Tải dữ liệu giá cổ phiếu từ Elasticsearch index.
+    Xử lý các tên cột và chuyển đổi cột ngày.
+    Schema mong đợi: id, create_date (hoặc time), close, volume, source, symbol, open
+    """
     try:
-        print(f"DEBUG: Bắt đầu tải dữ liệu giá từ: {file_path}")
+        print(f"Đang thử tải dữ liệu giá từ Elasticsearch: {es_host}:{es_port}/{es_index}")
+        
+        # Cấu hình Elasticsearch
+        es_options = {
+            "es.nodes": es_host,
+            "es.port": es_port,
+            "es.resource": es_index,
+            "es.read.field.as.array.include": "tags",
+            "es.nodes.wan.only": "true"
+        }
+        
+        # Đọc dữ liệu từ Elasticsearch
+        prices_df = spark.read.format("org.elasticsearch.spark.sql") \
+                              .options(**es_options) \
+                              .load()
 
-        price_schema = StructType([
-            StructField("id", StringType(), True),
-            StructField("date", StringType(), True),
-            StructField("close", DoubleType(), True),
-            StructField("volume", StringType(), True),
-            StructField("source", StringType(), True),
-            StructField("symbol", StringType(), True),
-            StructField("open", DoubleType(), True)
-        ])
+        print("Schema của prices_df sau khi đọc từ Elasticsearch:")
+        prices_df.printSchema()
 
-        prices_df = spark.read.csv(file_path, header=True, schema=price_schema)
-
-        if "open" in prices_df.columns:
+        # Đổi tên cột 'open' và 'close' nếu chúng tồn tại và chưa đúng tên
+        if "open" in prices_df.columns and "open_price" not in prices_df.columns:
             prices_df = prices_df.withColumnRenamed("open", "open_price")
-        if "close" in prices_df.columns:
+        if "close" in prices_df.columns and "close_price" not in prices_df.columns:
             prices_df = prices_df.withColumnRenamed("close", "close_price")
 
-        count_before_date_parse = prices_df.count()
-        print(f"DEBUG: Số dòng prices_df tải được (sau khi áp schema và đổi tên cột nếu có): {count_before_date_parse}")
+        date_col_source = None
+        date_col_final_name = "date"
 
-        if count_before_date_parse == 0:
-            print(f"CẢNH BÁO: Không có dòng nào được đọc từ {file_path} với schema đã định nghĩa.")
+        # Ưu tiên các tên cột ngày có thể có trong Elasticsearch index
+        if "create_date" in prices_df.columns:
+            date_col_source = "create_date"
+            print(f"Sử dụng cột '{date_col_source}' để tạo cột '{date_col_final_name}' cho prices_df.")
+            prices_df = prices_df.withColumn(date_col_final_name, to_date(to_timestamp(col(date_col_source), date_format_in_file)))
+        elif "time" in prices_df.columns: 
+            date_col_source = "time"
+            print(f"Sử dụng cột '{date_col_source}' để tạo cột '{date_col_final_name}' cho prices_df.")
+            prices_df = prices_df.withColumn(date_col_final_name, to_date(to_timestamp(col(date_col_source), date_format_in_file)))
+        elif "date_str" in prices_df.columns: 
+            date_col_source = "date_str"
+            prices_df = prices_df.withColumn(date_col_final_name, to_date(col(date_col_source), "yyyy-MM-dd")) 
+        elif "date" in prices_df.columns and str(prices_df.schema["date"].dataType) != "DateType()":
+            date_col_source = "date" 
+            print(f"Cột 'date' trong Elasticsearch index không phải DateType, đang thử chuyển đổi từ string...")
+            prices_df = prices_df.withColumn("date_temp_col", to_date(col("date").cast("string"), "yyyy-MM-dd"))
+            if "date_temp_col" in prices_df.columns:
+                prices_df = prices_df.drop("date").withColumnRenamed("date_temp_col", date_col_final_name)
+            else: 
+                print(f"LỖI: Không thể chuyển đổi cột 'date' sang DateType trong prices_df.")
+                return None
+        elif "date" in prices_df.columns and str(prices_df.schema["date"].dataType) == "DateType()":
+            print("Cột 'date' trong prices_df đã là DateType.")
+            if "date" != date_col_final_name : 
+                 prices_df = prices_df.withColumnRenamed("date", date_col_final_name) 
+        else:
+             print(f"LỖI: Không tìm thấy cột ngày phù hợp ('create_date', 'time', 'date_str', hoặc 'date') trong Elasticsearch index {es_index}")
+             prices_df.printSchema()
+             return None
+        
+        if date_col_source and date_col_source != date_col_final_name and date_col_source in prices_df.columns: 
+            prices_df = prices_df.drop(date_col_source)
+        
+        required_cols = ["date", "symbol", "open_price", "close_price"]
+        if not all(c in prices_df.columns for c in required_cols):
+            print(f"LỖI: prices_df thiếu một hoặc nhiều cột cần thiết ({required_cols}) sau khi xử lý. Các cột hiện có: {prices_df.columns}")
+            prices_df.printSchema()
             return None
-
-        print(f"DEBUG: Giá trị cột 'date' (từ CSV) mẫu trước khi parse cho {file_path}:")
-        prices_df.select("date").show(5, truncate=False)
-
-        print(f"DEBUG: Chuyển đổi cột 'date' (từ CSV) sang 'date_parsed_temp' với định dạng '{date_format}' cho {file_path}")
-        prices_df_with_date = prices_df.withColumn("date_parsed_temp", to_date(col("date"), date_format))
-
-        print(f"DEBUG: Hiển thị một vài dòng sau khi thử parse date (cột 'date_parsed_temp') cho {file_path}:")
-        prices_df_with_date.select(col("date").alias("original_date_from_csv"), "date_parsed_temp").show(5, truncate=False)
-
-        prices_df_filtered = prices_df_with_date.filter(col("date_parsed_temp").isNotNull())
-        count_after_date_filter = prices_df_filtered.count()
-        print(f"DEBUG: Số dòng prices_df sau khi lọc các ngày không hợp lệ (date_parsed_temp isNotNull): {count_after_date_filter}")
-
-        if count_after_date_filter == 0:
-            print(f"Cảnh báo: Không có dữ liệu giá nào được tải từ {file_path} sau khi lọc ngày. Tất cả các giá trị trong cột 'date' (từ CSV) có thể không hợp lệ theo định dạng '{date_format}' hoặc là null.")
-            return None
-
-        required_price_cols = ["symbol", "open_price", "close_price"]
-        missing_cols = [c for c in required_price_cols if c not in prices_df_filtered.columns]
-        if missing_cols:
-            print(f"CẢNH BÁO NGHIÊM TRỌNG: Các cột giá cần thiết bị thiếu sau khi lọc: {missing_cols} trong file {file_path}")
-            return None
-
-        final_prices_df = prices_df_filtered.select(
-            col("date_parsed_temp").alias("date"),
-            "symbol",
-            "open_price",
-            "close_price"
-        )
-
-        print(f"Tải thành công {final_prices_df.count()} dòng dữ liệu giá từ {file_path}.")
-        return final_prices_df
+            
+        prices_df = prices_df.select(*required_cols) 
+        
+        print(f"Đã tải và xử lý dữ liệu giá từ Elasticsearch index: {es_index}")
+        prices_df.printSchema()
+        print(f"Số lượng dòng trong prices_df: {prices_df.count()}") 
+        prices_df.show(5, truncate=False)
+        return prices_df
     except Exception as e:
-        print(f"Lỗi nghiêm trọng khi tải dữ liệu giá từ {file_path}: {e}")
+        print(f"Lỗi khi tải dữ liệu giá từ Elasticsearch index {es_index}: {e}")
+        import traceback
         traceback.print_exc()
         return None
 
-
-def load_news_articles(spark, file_path):
+def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="articles", 
+                      date_format_in_file="yyyy-MM-dd"):
+    """
+    Tải dữ liệu bài báo từ Elasticsearch index.
+    Xử lý cột ngày và cột text. Cột 'symbol' không còn được yêu cầu.
+    Schema mong đợi: id, date, link, article_text, title
+    """
     try:
-        print(f"DEBUG: Bắt đầu tải dữ liệu bài báo từ: {file_path}")
+        print(f"Đang thử tải dữ liệu bài báo từ Elasticsearch: {es_host}:{es_port}/{es_index}")
+        
+        # Cấu hình Elasticsearch
+        es_options = {
+            "es.nodes": es_host,
+            "es.port": es_port,
+            "es.resource": es_index,
+            "es.read.field.as.array.include": "tags",
+            "es.nodes.wan.only": "true"
+        }
+        
+        # Đọc dữ liệu từ Elasticsearch
+        articles_df = spark.read.format("org.elasticsearch.spark.sql") \
+                                .options(**es_options) \
+                                .load()
+        
+        print("Schema của articles_df sau khi đọc từ Elasticsearch:")
+        articles_df.printSchema()
 
-        article_schema = StructType([
-            StructField("id", StringType(), True),
-            StructField("date", StringType(), True),
-            StructField("link", StringType(), True),
-            StructField("title", StringType(), True),
-            StructField("text", StringType(), True),
-            StructField("symbol", StringType(), True)
-        ])
+        date_col_final_name = "date"
+        # Xử lý cột ngày:
+        if date_col_final_name in articles_df.columns:
+            if str(articles_df.schema[date_col_final_name].dataType) != "DateType()":
+                print(f"Cột '{date_col_final_name}' trong Elasticsearch index là StringType, đang chuyển đổi sang DateType...")
+                # Giả sử định dạng ngày trong cột 'date' của Elasticsearch index là một timestamp string có thể parse được
+                articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col(date_col_final_name), date_format_in_file))) 
+            else: # Đã là DateType
+                print(f"Cột '{date_col_final_name}' trong Elasticsearch index đã là DateType.")
+                # Đảm bảo tên cột là 'date' nếu nó đã là DateType nhưng có tên khác (ít khả năng)
+                if date_col_final_name != "date": 
+                    articles_df = articles_df.withColumnRenamed(date_col_final_name, "date")
+        elif "create_date" in articles_df.columns: # Fallback nếu có create_date
+             print("Sử dụng cột 'create_date' để tạo cột 'date' cho articles_df.")
+             articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col("create_date"), date_format_in_file)))
+             if "create_date" != date_col_final_name: articles_df = articles_df.drop("create_date")
+        else: # Nếu không có cả 'date' lẫn 'create_date'
+            print(f"LỖI: Không tìm thấy cột ngày phù hợp ('date' hoặc 'create_date') trong Elasticsearch index {es_index}.")
+            return None 
 
-        articles_df_raw = spark.read \
-            .option("header", "true") \
-            .option("multiLine", "true") \
-            .option("escape", "\"") \
-            .schema(article_schema) \
-            .csv(file_path)
+        text_col_final_name = "article_text"
+        if text_col_final_name not in articles_df.columns:
+            if "text" in articles_df.columns: 
+                articles_df = articles_df.withColumnRenamed("text", text_col_final_name)
+                print("Đã đổi tên cột 'text' thành 'article_text'.")
+            else:
+                 print(f"LỖI: Không tìm thấy cột '{text_col_final_name}' hoặc 'text' trong Elasticsearch index {es_index}.")
+                 return None
+        else: # Cột article_text đã tồn tại
+            if "article_text" != text_col_final_name: # Đảm bảo tên cuối cùng
+                 articles_df = articles_df.withColumnRenamed("article_text", text_col_final_name)
+            print(f"Cột '{text_col_final_name}' đã tồn tại.")
 
-        count_before_date_parse = articles_df_raw.count()
-        print(f"DEBUG: Số dòng articles_df_raw tải được (sau khi áp schema, multiLine=true): {count_before_date_parse}")
-
-        if count_before_date_parse == 0:
-            print(f"CẢNH BÁO: Không có dòng nào được đọc từ {file_path} với schema và tùy chọn multiLine.")
+        # Chỉ chọn cột date và article_text
+        final_selected_cols = [date_col_final_name, text_col_final_name]
+        
+        missing_final_cols = [c for c in final_selected_cols if c not in articles_df.columns]
+        if missing_final_cols:
+            print(f"LỖI: articles_df thiếu các cột cuối cùng mong đợi cho join theo ngày: {missing_final_cols}. Các cột hiện có: {articles_df.columns}")
+            articles_df.printSchema()
             return None
 
-        print(f"DEBUG: Giá trị cột 'date' (từ CSV) mẫu trước khi parse cho {file_path}:")
-        articles_df_raw.select("date").show(5, truncate=False)
+        articles_df = articles_df.select(*final_selected_cols)
 
-        articles_df_renamed = articles_df_raw
-        if "article_text" in articles_df_raw.columns and "text" not in articles_df_raw.columns:
-            articles_df_renamed = articles_df_raw.withColumnRenamed("article_text", "text")
-        elif "article_text" not in articles_df_raw.columns and "text" not in articles_df_raw.columns:
-            print(f"CẢNH BẢO: Không tìm thấy cột 'article_text' hoặc 'text' trong {file_path}. Sẽ tạo cột 'text' rỗng.")
-            articles_df_renamed = articles_df_raw.withColumn("text", lit("").cast(StringType()))
-
-        print(f"DEBUG: Chuyển đổi cột 'date' (từ CSV) sang 'date_parsed_temp' cho {file_path}. Spark sẽ cố gắng tự nhận diện định dạng.")
-        articles_df_with_date = articles_df_renamed.withColumn("date_parsed_temp", to_date(col("date")))
-
-        print(f"DEBUG: Hiển thị một vài dòng sau khi thử parse date (cột 'date_parsed_temp') cho {file_path}:")
-        articles_df_with_date.select(col("date").alias("original_date_from_csv"), "date_parsed_temp").show(5, truncate=False)
-
-        articles_df_filtered = articles_df_with_date.filter(col("date_parsed_temp").isNotNull())
-        count_after_date_filter = articles_df_filtered.count()
-        print(f"DEBUG: Số dòng articles_df sau khi lọc các ngày không hợp lệ (date_parsed_temp isNotNull): {count_after_date_filter}")
-
-        if count_after_date_filter == 0:
-            print(f"Cảnh báo: Không có dữ liệu bài báo nào được tải từ {file_path} sau khi lọc ngày.")
-            return None
-
-        cols_to_select_articles = []
-        cols_to_select_articles.append(col("date_parsed_temp").alias("date"))
-
-        if "symbol" in articles_df_filtered.columns:
-             cols_to_select_articles.append("symbol")
-        else:
-            print(f"CẢNH BÁO: Cột 'symbol' không có trong articles_df_filtered cho file {file_path}. Sẽ bỏ qua cột symbol.")
-
-        if "text" in articles_df_filtered.columns:
-            cols_to_select_articles.append("text")
-        else:
-            print(f"CẢNH BÁO NGHIÊM TRỌNG: Cột 'text' không có trong articles_df_filtered cho file {file_path}.")
-            articles_df_filtered = articles_df_filtered.withColumn("text", lit("").cast(StringType()))
-            cols_to_select_articles.append("text")
-
-        final_articles_df = articles_df_filtered.select(*cols_to_select_articles)
-
-        print(f"Tải thành công {final_articles_df.count()} dòng dữ liệu bài báo từ {file_path}.")
-        return final_articles_df
+        print(f"Đã tải và xử lý dữ liệu bài báo từ Elasticsearch index: {es_index}")
+        articles_df.printSchema()
+        print(f"Số lượng dòng trong articles_df (sau xử lý): {articles_df.count()}") 
+        articles_df.show(5, truncate=True)
+        return articles_df
     except Exception as e:
-        print(f"Lỗi nghiêm trọng khi tải dữ liệu bài báo từ {file_path}: {e}")
+        print(f"Lỗi khi tải dữ liệu bài báo từ Elasticsearch index {es_index}: {e}")
+        import traceback
         traceback.print_exc()
         return None
 
-# Giữ nguyên hàm join_data để dùng cho chế độ training từ CSV
-def join_data(prices_df, articles_df, article_separator=None):
-    if prices_df is None:
-        print("Dữ liệu giá là None. Không thể join.")
+def join_data(prices_df, articles_df, article_separator="<s>"):
+    """
+    Kết hợp dữ liệu giá cổ phiếu và bài báo đã được tải từ Elasticsearch.
+    """
+    if prices_df is None or articles_df is None:
+        print("Không thể kết hợp dữ liệu do một trong các DataFrame đầu vào là None.")
         return None
-    if articles_df is None:
-        print("Dữ liệu bài báo là None. Sẽ trả về dữ liệu giá với cột full_article_text rỗng.")
-        return prices_df.withColumn("full_article_text", lit("").cast(StringType()))
+    
+    required_prices_join_cols = ["date", "symbol", "open_price", "close_price"]
+    if not all(c in prices_df.columns for c in required_prices_join_cols):
+        print(f"Lỗi: prices_df thiếu các cột cần thiết: {required_prices_join_cols}. Các cột hiện có: {prices_df.columns}")
+        return None
 
-    separator_to_use = article_separator if article_separator is not None else config.ARTICLE_SEPARATOR
+    required_articles_agg_cols = ["date", "article_text"]
+    if not all(c in articles_df.columns for c in required_articles_agg_cols):
+        print(f"Lỗi: articles_df thiếu các cột cần thiết cho tổng hợp: {required_articles_agg_cols}. Các cột hiện có: {articles_df.columns}")
+        return None
+
+    if prices_df.rdd.isEmpty():
+        print("CẢNH BÁO: prices_df trống trước khi join.")
+    if articles_df.rdd.isEmpty():
+        print("CẢNH BÁO: articles_df trống trước khi join.")
+
     try:
-        if "text" not in articles_df.columns:
-            print("CẢNH BÁO: Cột 'text' không tồn tại trong articles_df khi join_data. Sẽ tạo cột full_article_text rỗng.")
-            return prices_df.withColumn("full_article_text", lit("").cast(StringType()))
-        if "symbol" not in articles_df.columns:
-            print("CẢNH BÁO: Cột 'symbol' không tồn tại trong articles_df khi join_data. Không thể join theo symbol. Sẽ tạo cột full_article_text rỗng.")
-            return prices_df.withColumn("full_article_text", lit("").cast(StringType()))
-        if "date" not in articles_df.columns:
-            print("CẢNH BÁO: Cột 'date' không tồn tại trong articles_df khi join_data. Không thể join theo date. Sẽ tạo cột full_article_text rỗng.")
-            return prices_df.withColumn("full_article_text", lit("").cast(StringType()))
+        print("Tổng hợp các bài báo theo ngày...")
+        articles_aggregated_df = articles_df.groupBy("date") \
+                                            .agg(F.concat_ws(article_separator, F.collect_list(col("article_text"))).alias("full_article_text"))
+        
+        print("Schema của articles_aggregated_df sau khi groupBy('date'):")
+        articles_aggregated_df.printSchema()
 
-        aggregated_articles_df = articles_df \
-            .groupBy("date", "symbol") \
-            .agg(concat_ws(separator_to_use, collect_list("text")).alias("full_article_text"))
-
-        joined_df = prices_df.join(aggregated_articles_df, on=["date", "symbol"], how="left")
-        joined_df = joined_df.na.fill({"full_article_text": ""})
-
-        print(f"Join dữ liệu thành công. Số dòng sau khi join: {joined_df.count()}")
+        print("Thực hiện join dữ liệu giá và dữ liệu bài báo đã tổng hợp chỉ bằng cột 'date'...")
+        joined_df = prices_df.join(articles_aggregated_df, "date", "inner") 
+        
+        print("Dữ liệu sau khi join và tổng hợp bài báo:")
+        joined_df.printSchema()
+        print(f"Số lượng dòng trong joined_df: {joined_df.count()}") 
+        joined_df.show(5, truncate=True)
         return joined_df
+
     except Exception as e:
-        print(f"Lỗi trong quá trình join dữ liệu: {e}")
+        print(f"Lỗi khi kết hợp dữ liệu: {e}")
+        import traceback
         traceback.print_exc()
         return None
+
+def load_raw_data(spark, es_host="localhost", es_port="9200", stock_index="prices", article_index="articles",
+                article_separator="<s>", date_format = "yyyy-MM-dd"):
+    prices_df = load_stock_prices(spark, es_host=es_host, es_port=es_port, es_index=stock_index
+                                , date_format_in_file=date_format)
+    articles_df = load_news_articles(spark,  es_host=es_host, es_port=es_port, es_index=article_index
+                                    , date_format_in_file=date_format)
+
+    if prices_df is None or articles_df is None:
+        print("Không thể tải dữ liệu huấn luyện ")
+        return
+
+    joined_df = join_data(prices_df, articles_df, article_separator=article_separator)
+
+    if joined_df is None:
+        print("Không thể kết hợp dữ liệu. Kết thúc quy trình huấn luyện.")
+        return
+    return joined_df
 
 # --- Hàm mới: Đọc dữ liệu từ Kafka bằng Spark Structured Streaming ---
 
@@ -218,6 +280,28 @@ kafka_data_schema = StructType([
     StructField("open_price", DoubleType(), True)
 ])
 
+def configure_elasticsearch_connection(spark, es_host="localhost", es_port="9200", 
+                                     es_user=None, es_password=None, es_ssl=False):
+    """
+    Cấu hình kết nối Elasticsearch cho Spark session.
+    """
+    spark.conf.set("es.nodes", es_host)
+    spark.conf.set("es.port", es_port)
+    
+    # FIX: Remove or set es.nodes.wan.only to "false" for Docker networking.
+    # This setting is for cloud/WAN environments, not local Docker networks.
+    spark.conf.set("es.nodes.wan.only", "false") 
+    
+    if es_user and es_password:
+        spark.conf.set("es.net.http.auth.user", es_user)
+        spark.conf.set("es.net.http.auth.pass", es_password)
+    
+    if es_ssl:
+        spark.conf.set("es.net.ssl", "true")
+        # You might need this if you use self-signed certificates for ES
+        # spark.conf.set("es.net.ssl.cert.allow.self.signed", "true") 
+    
+    print(f"Đã cấu hình kết nối Elasticsearch: {es_host}:{es_port}")
 
 def read_stream_from_kafka(spark, kafka_broker, topic):
     """

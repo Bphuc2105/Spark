@@ -7,6 +7,7 @@ SPARK_APP_NAME = "StockPricePredictionPySpark"
 DATA_DIR = "data" # Đường dẫn đến thư mục data, tương đối với /app
 MODELS_DIR = "models" # Đường dẫn đến thư thư mục models, tương đối với /app
 
+
 # Đường dẫn cụ thể cho các tệp dữ liệu huấn luyện/kiểm thử (vẫn dùng CSV cho training)
 TRAIN_PRICES_FILE = f"{DATA_DIR}/prices.csv"
 TRAIN_ARTICLES_FILE = f"{DATA_DIR}/articles.csv"
@@ -25,18 +26,6 @@ NUMERICAL_INPUT_COLUMNS = ["open_price", "close_price"]
 FEATURES_OUTPUT_COLUMN = "features" 
 LABEL_OUTPUT_COLUMN = "label" 
 
-HASHING_TF_NUM_FEATURES = 10000
-
-VIETNAMESE_STOPWORDS = [
-    "và", "là", "có", "của", "trong", "cho", "đến", "khi", "thì", "mà", "ở", "tại",
-    "này", "đó", "các", "những", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín", "mười",
-    "được", "bị", "do", "vì", "nên", "nhưng", "nếu", "thế", "đã", "sẽ", "đang", "rằng", "vẫn",
-    "để", "không", "có_thể", "cũng", "với", "như", "về", "sau", "trước", "trên", "dưới",
-    "ông", "bà", "anh", "chị", "em", "tôi", "chúng_tôi", "bạn", "họ", "ai", "gì",
-    "ngày", "tháng", "năm", "theo", "tuy_nhiên", "tuyệt_vời", "bao_gồm", "thực_sự",
-    "vào", "ra", "lên", "xuống", "qua", "lại", "từ", "chỉ", "còn", "mới", "rất", "quá",
-    "điều", "việc", "người", "cách", "khác", "phải", "luôn", "bao_giờ", "hơn", "nhất"
-]
 ARTICLE_SEPARATOR = "<s>" 
 
 # --- Cấu hình huấn luyện mô hình (vẫn dùng cho chế độ train) ---
@@ -56,22 +45,26 @@ NEWS_ARTICLES_TOPIC = "news_articles" # Topic Kafka cho dữ liệu bài báo m�
 STOCK_PRICES_TOPIC = "stock_prices" # Topic Kafka cho dữ liệu giá mới (tùy chọn, nếu stream cả giá)
 
 # --- Cấu hình Elasticsearch ---
-ELASTICSEARCH_HOST = "elasticsearch" # Tên service 'elasticsearch' trong docker-compose
-ELASTICSEARCH_PORT = "9200" # Port mặc định của Elasticsearch
-ES_PREDICTION_INDEX = "stock_predictions" # Index trong Elasticsearch để lưu kết quả dự đoán
-# Cấu hình cho Spark-Elasticsearch connector (cần cho Spark để ghi dữ liệu)
-ES_NODES = ELASTICSEARCH_HOST # Hoặc "http://elasticsearch:9200" tùy cấu hình connector
-ES_PORT = ELASTICSEARCH_PORT
+ES_NODES = "elasticsearch" # Hoặc "http://elasticsearch:9200" tùy cấu hình connector
+ES_PORT = "9200"
+ES_USER = None  # Đặt username nếu cần xác thực
+ES_PASSWORD = None  # Đặt password nếu cần xác thực
+ES_SSL = False  # Đặt True nếu sử dụng HTTPS
+
+# index chứa data trong elasticsearch
+ES_PRICES_INDEX = "prices"
+ES_ARTICLES_INDEX = "articles"
+
+# index lưu data predict được
+ES_PREDICTION_INDEX = "prices"
 
 if __name__ == "__main__":
     print(f"Tên ứng dụng Spark: {SPARK_APP_NAME}")
     print(f"Đường dẫn tệp giá huấn luyện (trong container): {TRAIN_PRICES_FILE}")
     print(f"Đường dẫn lưu mô hình (trong container): {SAVED_REGRESSION_MODEL_PATH}")
-    print(f"Số lượng features cho HashingTF: {HASHING_TF_NUM_FEATURES}")
     print(f"Tỷ lệ chia train/test: {TRAIN_TEST_SPLIT_RATIO}")
-    print(f"Một vài từ dừng tiếng Việt đầu tiên: {VIETNAMESE_STOPWORDS[:5]}")
     print(f"Kafka Broker: {KAFKA_BROKER}")
     print(f"Kafka Topic Bài báo: {NEWS_ARTICLES_TOPIC}")
-    print(f"Elasticsearch Host: {ELASTICSEARCH_HOST}")
-    print(f"Elasticsearch Port: {ELASTICSEARCH_PORT}")
+    print(f"Elasticsearch Host: {ES_NODES}")
+    print(f"Elasticsearch Port: {ES_PORT}")
     print(f"Elasticsearch Prediction Index: {ES_PREDICTION_INDEX}")

@@ -14,7 +14,7 @@ try:
     from src import config
     from src.utils import get_logger
     # Chỉ import những hàm cần thiết cho chế độ train (CSV)
-    from src.data_loader import load_stock_prices, load_news_articles, join_data, read_stream_from_kafka     # Import hàm mới để đọc từ Kafka cho chế độ predict
+    from src.data_loader import load_raw_data, read_stream_from_kafka, configure_elasticsearch_connection     # Import hàm mới để đọc từ Kafka cho chế độ predict
     from src.preprocessing import create_preprocessing_pipeline
     from src.train import train_regression_model, save_model
     from src.predict import load_prediction_model, make_predictions, write_stream_to_elasticsearch
@@ -36,21 +36,11 @@ logger = get_logger(__name__)
 def run_training_pipeline(spark):
     logger.info("Bắt đầu quy trình huấn luyện mô hình HỒI QUY (đọc từ CSV)...")
 
+    configure_elasticsearch_connection(spark, config.ES_NODES, config.ES_PORT)
+    
     date_format_prices = getattr(config, 'DATE_FORMAT_PRICES', "yyyy-MM-dd")
-
-    logger.info(f"Đang tải dữ liệu giá từ: {config.TRAIN_PRICES_FILE} với định dạng ngày: {date_format_prices}")
-    prices_df = load_stock_prices(spark, config.TRAIN_PRICES_FILE, date_format=date_format_prices)
-
-    logger.info(f"Đang tải dữ liệu bài báo từ: {config.TRAIN_ARTICLES_FILE} (Spark tự nhận diện định dạng ngày)")
-    articles_df = load_news_articles(spark, config.TRAIN_ARTICLES_FILE)
-
-    if prices_df is None or articles_df is None:
-        logger.error("Không thể tải dữ liệu huấn luyện (giá hoặc bài báo là None). Kết thúc quy trình huấn luyện.")
-        return
-
-    logger.info("Đang kết hợp dữ liệu giá và bài báo...")
-    article_separator_to_use = getattr(config, 'ARTICLE_SEPARATOR', " --- ")
-    raw_joined_df = join_data(prices_df, articles_df, article_separator=article_separator_to_use)
+    raw_joined_df = load_raw_data(spark, config.ES_NODES, config.ES_PORT, config.ES_PRICES_INDEX, 
+                                  config.ES_ARTICLES_INDEX, config.ARTICLE_SEPARATOR, date_format_prices)
 
     if raw_joined_df is None:
         logger.error("Không thể kết hợp dữ liệu. Kết thúc quy trình huấn luyện.")
@@ -66,7 +56,6 @@ def run_training_pipeline(spark):
     text_feature_col = getattr(config, 'TEXT_INPUT_COLUMN', 'full_article_text')
     numerical_feature_cols = getattr(config, 'NUMERICAL_INPUT_COLUMNS', ['open_price'])
     features_output_col = getattr(config, 'FEATURES_OUTPUT_COLUMN', 'features')
-
 
     preprocessing_pipeline_obj = create_preprocessing_pipeline(
         text_input_col=text_feature_col,
