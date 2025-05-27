@@ -6,8 +6,8 @@ services:
     container_name: namenode
     restart: always
     ports:
-      - "9870:9870" # NameNode Web UI
-      - "9000:9000" # HDFS IPC
+      - "9870:9870" 
+      - "9000:9000" 
     volumes:
       - namenode_data:/hadoop/dfs/name
     environment:
@@ -26,7 +26,7 @@ services:
     volumes:
       - datanode_data:/hadoop/dfs/data
     environment:
-      SERVICE_PRECONDITION: "namenode:9870" # Đợi NameNode UI sẵn sàng trên port 9870
+      SERVICE_PRECONDITION: "namenode:9870" 
     env_file:
       - ./hadoop.env
     networks:
@@ -51,10 +51,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: spark-worker # Giữ tên này nếu chỉ có 1 worker
+    container_name: spark-worker 
     depends_on:
       - spark-master
-      - namenode # Worker cũng nên thấy NameNode
+      - namenode 
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -78,9 +78,9 @@ services:
     container_name: spark-app-submitter
     depends_on:
       - spark-master
-      - elasticsearch # Thêm elasticsearch vào depends_on nếu app ghi vào đó
-      - namenode    # QUAN TRỌNG: spark-app cần HDFS sẵn sàng
-      - datanode    # Thêm datanode để chắc chắn hơn
+      - elasticsearch 
+      - namenode    
+      - datanode    
     environment:
       - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077
       - PYTHONUNBUFFERED=1
@@ -88,11 +88,11 @@ services:
       - ELASTICSEARCH_HOST=elasticsearch
       - ELASTICSEARCH_PORT=9200
       - ES_PREDICTION_INDEX=stock_predictions
-      # Biến môi trường để Python code biết HDFS path (sử dụng trong src/config.py)
+      
       - HDFS_NAMENODE_URL=hdfs://namenode:9000
       - HADOOP_USER_NAME=spark
     volumes:
-      # Giữ nguyên các mount cụ thể nếu bạn muốn, hoặc đơn giản hóa thành .:/app
+      
       - ./__init__.py:/app/__init__.py
       - ./main.py:/app/main.py
       - ./src:/app/src
@@ -143,9 +143,9 @@ services:
       - spark-network
 
 volumes:
-  namenode_data: # THÊM ĐỊNH NGHĨA
+  namenode_data: 
     driver: local
-  datanode_data: # THÊM ĐỊNH NGHĨA
+  datanode_data: 
     driver: local
   esdata:
     driver: local

@@ -1,12 +1,9 @@
-# src/data_loader.py
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_date, from_json, to_timestamp
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, DateType, TimestampType
 from pyspark.sql import functions as F
 import traceback
 
-# Import cấu hình sử dụng absolute import để đảm bảo import đúng module
 try:
     from src import config
     ARTICLE_SEPARATOR = config.ARTICLE_SEPARATOR
@@ -16,11 +13,10 @@ try:
 except ImportError as e:
     print(f"Lỗi import config trong data_loader.py: {e}")
     print("Cảnh báo: Không thể import config từ src, sử dụng giá trị mặc định và fallback cho Kafka/ES.")
-    ARTICLE_SEPARATOR = " --- " # Fallback
-    KAFKA_BROKER = "localhost:9092" # Fallback
-    NEWS_ARTICLES_TOPIC = "news_articles" # Fallback
-    STOCK_PRICES_TOPIC = "stock_prices" # Fallback
-
+    ARTICLE_SEPARATOR = " --- " 
+    KAFKA_BROKER = "localhost:9092" 
+    NEWS_ARTICLES_TOPIC = "news_articles" 
+    STOCK_PRICES_TOPIC = "stock_prices" 
 
 def get_spark_session(app_name="StockPredictionApp"):
     """
@@ -44,7 +40,7 @@ def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="pric
     try:
         print(f"Đang thử tải dữ liệu giá từ Elasticsearch: {es_host}:{es_port}/{es_index}")
         
-        # Cấu hình Elasticsearch
+        
         es_options = {
             "es.nodes": es_host,
             "es.port": es_port,
@@ -53,7 +49,7 @@ def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="pric
             "es.nodes.wan.only": "true"
         }
         
-        # Đọc dữ liệu từ Elasticsearch
+        
         prices_df = spark.read.format("org.elasticsearch.spark.sql") \
                               .options(**es_options) \
                               .load()
@@ -61,7 +57,7 @@ def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="pric
         print("Schema của prices_df sau khi đọc từ Elasticsearch:")
         prices_df.printSchema()
 
-        # Đổi tên cột 'open' và 'close' nếu chúng tồn tại và chưa đúng tên
+        
         if "open" in prices_df.columns and "open_price" not in prices_df.columns:
             prices_df = prices_df.withColumnRenamed("open", "open_price")
         if "close" in prices_df.columns and "close_price" not in prices_df.columns:
@@ -70,7 +66,7 @@ def load_stock_prices(spark, es_host="localhost", es_port="9200", es_index="pric
         date_col_source = None
         date_col_final_name = "date"
 
-        # Ưu tiên các tên cột ngày có thể có trong Elasticsearch index
+        
         if "create_date" in prices_df.columns:
             date_col_source = "create_date"
             print(f"Sử dụng cột '{date_col_source}' để tạo cột '{date_col_final_name}' cho prices_df.")
@@ -132,7 +128,7 @@ def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="art
     try:
         print(f"Đang thử tải dữ liệu bài báo từ Elasticsearch: {es_host}:{es_port}/{es_index}")
         
-        # Cấu hình Elasticsearch
+        
         es_options = {
             "es.nodes": es_host,
             "es.port": es_port,
@@ -141,7 +137,7 @@ def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="art
             "es.nodes.wan.only": "true"
         }
         
-        # Đọc dữ liệu từ Elasticsearch
+        
         articles_df = spark.read.format("org.elasticsearch.spark.sql") \
                                 .options(**es_options) \
                                 .load()
@@ -150,22 +146,22 @@ def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="art
         articles_df.printSchema()
 
         date_col_final_name = "date"
-        # Xử lý cột ngày:
+        
         if date_col_final_name in articles_df.columns:
             if str(articles_df.schema[date_col_final_name].dataType) != "DateType()":
                 print(f"Cột '{date_col_final_name}' trong Elasticsearch index là StringType, đang chuyển đổi sang DateType...")
-                # Giả sử định dạng ngày trong cột 'date' của Elasticsearch index là một timestamp string có thể parse được
+                
                 articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col(date_col_final_name), date_format_in_file))) 
-            else: # Đã là DateType
+            else: 
                 print(f"Cột '{date_col_final_name}' trong Elasticsearch index đã là DateType.")
-                # Đảm bảo tên cột là 'date' nếu nó đã là DateType nhưng có tên khác (ít khả năng)
+                
                 if date_col_final_name != "date": 
                     articles_df = articles_df.withColumnRenamed(date_col_final_name, "date")
-        elif "create_date" in articles_df.columns: # Fallback nếu có create_date
+        elif "create_date" in articles_df.columns: 
              print("Sử dụng cột 'create_date' để tạo cột 'date' cho articles_df.")
              articles_df = articles_df.withColumn(date_col_final_name, to_date(to_timestamp(col("create_date"), date_format_in_file)))
              if "create_date" != date_col_final_name: articles_df = articles_df.drop("create_date")
-        else: # Nếu không có cả 'date' lẫn 'create_date'
+        else: 
             print(f"LỖI: Không tìm thấy cột ngày phù hợp ('date' hoặc 'create_date') trong Elasticsearch index {es_index}.")
             return None 
 
@@ -177,12 +173,12 @@ def load_news_articles(spark, es_host="localhost", es_port="9200", es_index="art
             else:
                  print(f"LỖI: Không tìm thấy cột '{text_col_final_name}' hoặc 'text' trong Elasticsearch index {es_index}.")
                  return None
-        else: # Cột article_text đã tồn tại
-            if "article_text" != text_col_final_name: # Đảm bảo tên cuối cùng
+        else: 
+            if "article_text" != text_col_final_name: 
                  articles_df = articles_df.withColumnRenamed("article_text", text_col_final_name)
             print(f"Cột '{text_col_final_name}' đã tồn tại.")
 
-        # Chỉ chọn cột date và article_text
+        
         final_selected_cols = [date_col_final_name, text_col_final_name]
         
         missing_final_cols = [c for c in final_selected_cols if c not in articles_df.columns]
@@ -268,9 +264,6 @@ def load_raw_data(spark, es_host="localhost", es_port="9200", stock_index="price
         return
     return joined_df
 
-
-# --- Hàm mới: Đọc dữ liệu từ Kafka bằng Spark Structured Streaming ---
-
 kafka_data_schema = StructType([
     StructField("id", StringType(), True),
     StructField("date", StringType(), True),
@@ -289,8 +282,8 @@ def configure_elasticsearch_connection(spark, es_host="localhost", es_port="9200
     spark.conf.set("es.nodes", es_host)
     spark.conf.set("es.port", es_port)
     
-    # FIX: Remove or set es.nodes.wan.only to "false" for Docker networking.
-    # This setting is for cloud/WAN environments, not local Docker networks.
+    
+    
     spark.conf.set("es.nodes.wan.only", "false") 
     
     if es_user and es_password:
@@ -299,8 +292,8 @@ def configure_elasticsearch_connection(spark, es_host="localhost", es_port="9200
     
     if es_ssl:
         spark.conf.set("es.net.ssl", "true")
-        # You might need this if you use self-signed certificates for ES
-        # spark.conf.set("es.net.ssl.cert.allow.self.signed", "true") 
+        
+        
     
     print(f"Đã cấu hình kết nối Elasticsearch: {es_host}:{es_port}")
 
@@ -360,7 +353,6 @@ def read_stream_from_kafka(spark, kafka_broker, topic):
         print(f"Lỗi khi đọc stream từ Kafka: {e}")
         traceback.print_exc()
         return None
-
 
 if __name__ == '__main__':
     print("--- Bỏ qua Test Standalone cho data_loader.py khi tích hợp Kafka ---")

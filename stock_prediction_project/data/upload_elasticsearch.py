@@ -8,7 +8,7 @@ def create_index_with_date_mapping(es, index_name, df, reset_index=False):
         print(f"Index '{index_name}' deleted.")
 
     if not es.indices.exists(index=index_name):
-        # Only create explicit mapping for the 'date' field
+        
         mapping = {
             "mappings": {
                 "properties": {
@@ -37,8 +37,8 @@ def upload_csv_to_elasticsearch(csv_path, index_name, es_host="http://localhost:
     es = Elasticsearch(es_host)
     df = pd.read_csv(csv_path)
 
-    # Drop rows with missing 'text'
-    # df = df[~df['text'].isna()]
+    
+    
 
     create_index_with_date_mapping(es, index_name, df, reset_index=reset_index)
 
@@ -54,5 +54,5 @@ def upload_csv_to_elasticsearch(csv_path, index_name, es_host="http://localhost:
         for item in e.errors:
             print(item)
 
-# Example usage
+
 upload_csv_to_elasticsearch("data/prices.csv", "prices", reset_index=True)

@@ -1,10 +1,10 @@
-# src/utils.py
+
 
 import logging
-import yaml # Bạn có thể cần cài đặt thư viện PyYAML: pip install PyYAML
+import yaml 
 
-# --- Cấu hình Logging cơ bản ---
-# Bạn có thể tùy chỉnh cấu hình này cho phức tạp hơn nếu cần
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,16 +23,16 @@ def get_logger(name):
     """
     return logging.getLogger(name)
 
-# --- Ví dụ về hàm tải cấu hình từ tệp YAML ---
-# Bạn sẽ cần tạo một tệp config.yaml nếu muốn sử dụng hàm này.
-# Ví dụ:
-# config.yaml:
-# app_name: "StockPredictionApp"
-# data_paths:
-#   prices: "../data/prices_data.csv"
-#   articles: "../data/articles_data.csv"
-# model_paths:
-#   output_dir: "../models/my_stock_model"
+
+
+
+
+
+
+
+
+
+
 
 def load_config(config_path="config.yaml"):
     """
@@ -61,9 +61,9 @@ def load_config(config_path="config.yaml"):
         logger.error(f"Một lỗi không mong muốn xảy ra khi tải cấu hình: {e}")
         return None
 
-# --- Các hàm tiện ích khác có thể được thêm vào đây ---
 
-# Ví dụ: một hàm kiểm tra đường dẫn
+
+
 def check_path_exists(path_to_check):
     """
     Kiểm tra xem một đường dẫn có tồn tại không.
@@ -85,21 +85,18 @@ def check_path_exists(path_to_check):
 
 
 if __name__ == "__main__":
-    # Ví dụ cách sử dụng các hàm trong utils.py
+    
     logger = get_logger("UtilsTest")
 
     logger.info("Đây là một thông điệp info từ UtilsTest.")
     logger.warning("Đây là một thông điệp warning.")
     logger.error("Đây là một thông điệp error.")
-
-    # Kiểm tra hàm load_config
-    # Tạo một tệp config_sample.yaml để kiểm thử
     sample_config_content = """
     app_name: "MySampleApp"
     version: "1.0"
     paths:
-      input: "/data/input"
-      output: "/data/output"
+    input: "/data/input"
+    output: "/data/output"
     """
     sample_config_path = "config_sample.yaml"
     with open(sample_config_path, "w") as f:
@@ -109,12 +106,8 @@ if __name__ == "__main__":
     if config_data:
         logger.info(f"Tên ứng dụng từ config: {config_data.get('app_name')}")
         logger.info(f"Đường dẫn input từ config: {config_data.get('paths', {}).get('input')}")
-
-    # Xóa tệp config mẫu sau khi kiểm thử
     import os
     if os.path.exists(sample_config_path):
         os.remove(sample_config_path)
-
-    # Kiểm tra hàm check_path_exists
-    check_path_exists("../data") # Giả sử thư mục data tồn tại ở cấp trên
+    check_path_exists("../data") 
     check_path_exists("../non_existent_folder")

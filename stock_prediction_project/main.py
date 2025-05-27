@@ -1,5 +1,3 @@
-# main.py
-
 import argparse
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
@@ -10,13 +8,11 @@ import os
 import sys
 import traceback
 
-# Import các module và cấu hình từ thư mục src
 try:
-    # Sử dụng absolute import để đảm bảo import đúng module config
     from src import config
     from src.utils import get_logger
-    # Chỉ import những hàm cần thiết cho chế độ train (CSV)
-    from src.data_loader import load_raw_data, read_stream_from_kafka, configure_elasticsearch_connection     # Import hàm mới để đọc từ Kafka cho chế độ predict
+    
+    from src.data_loader import load_raw_data, read_stream_from_kafka, configure_elasticsearch_connection     
     from src.preprocessing import create_preprocessing_pipeline
     from src.train import train_regression_model, save_model
     from src.predict import load_prediction_model, make_predictions, write_dataframe_to_elasticsearch
@@ -25,13 +21,12 @@ except ImportError as e:
     print(f"LỖI IMPORT TRONG MAIN.PY: {e}")
     print("Hãy đảm bảo cấu trúc thư mục đúng (main.py và src/...) và PYTHONPATH được thiết lập chính xác.")
     print("Nếu chạy bằng spark-submit /app/main.py trong Docker, thư mục /app cần chứa cả main.py và thư mục src.")
-    # Fallback cơ bản cho logger nếu import thất bại
+    
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     def get_logger(name): return logging.getLogger(name)
-    # Thoát chương trình nếu import các module chính thất bại
+    
     sys.exit("Không thể import các module cần thiết. Vui lòng kiểm tra cấu trúc thư mục và PYTHONPATH.")
-
 
 logger = get_logger(__name__)
 
@@ -43,7 +38,6 @@ def run_training_pipeline(spark):
     date_format_prices = getattr(config, 'DATE_FORMAT_PRICES', "yyyy-MM-dd")
     raw_joined_df = load_raw_data(spark, config.ES_NODES, config.ES_PORT, config.ES_PRICES_INDEX, 
                                   config.ES_ARTICLES_INDEX, config.ARTICLE_SEPARATOR, date_format_prices)
-
     if raw_joined_df is None:
         logger.error("Không thể kết hợp dữ liệu. Kết thúc quy trình huấn luyện.")
         return
@@ -71,22 +65,41 @@ def run_training_pipeline(spark):
     trained_model = train_regression_model(spark, raw_joined_df, preprocessing_stages, label_col_name=output_label_col_name)
 
     if trained_model:
-        model_save_path = getattr(config, 'SAVED_REGRESSION_MODEL_PATH', os.path.join(config.MODELS_DIR, "stock_prediction_pipeline_model_regression"))
-        logger.info(f"Đang lưu mô hình hồi quy vào: {model_save_path}")
+        model_save_path_hdfs = getattr(config, 'HDFS_MODEL_SAVE_PATH', None)
+        model_save_path_local = getattr(config, 'LOCAL_SAVED_REGRESSION_MODEL_PATH', None)
+        save_path_to_use = None
+        is_hdfs = False
 
-        save_successful = save_model(trained_model, model_save_path)
-        if save_successful:
-            logger.info(f"Quy trình huấn luyện hồi quy hoàn tất và mô hình đã được LƯU THÀNH CÔNG vào {model_save_path}.")
+        if model_save_path_hdfs and model_save_path_hdfs.startswith("hdfs://"):
+            logger.info(f"Sẽ lưu mô hình lên HDFS: {model_save_path_hdfs}")
+            save_path_to_use = model_save_path_hdfs
+            is_hdfs = True
+        elif model_save_path_local:
+            logger.info(f"Không có cấu hình HDFS hợp lệ. Sẽ lưu mô hình cục bộ tại: {model_save_path_local}")
+            save_path_to_use = model_save_path_local
+            is_hdfs = False
+            local_model_dir = os.path.dirname(model_save_path_local)
+            if not os.path.exists(local_model_dir) and local_model_dir : 
+                try:
+                    os.makedirs(local_model_dir, exist_ok=True)
+                    logger.info(f"Đã tạo thư mục cục bộ: {local_model_dir}")
+                except Exception as e_mkdir:
+                    logger.error(f"Không thể tạo thư mục cục bộ {local_model_dir}: {e_mkdir}")
+                    save_path_to_use = None
         else:
-            logger.error(f"LƯU MÔ HÌNH THẤT BẠI vào {model_save_path}. Kiểm tra lỗi chi tiết trong log và quyền ghi thư mục.")
+            logger.error("Không có đường dẫn hợp lệ (HDFS hoặc local) để lưu mô hình.")
+
+        if save_path_to_use:
+            save_successful = save_model(trained_model, save_path_to_use, is_hdfs_path=is_hdfs)
+            if save_successful:
+                logger.info(f"Quy trình huấn luyện hoàn tất và mô hình đã được LƯU THÀNH CÔNG vào {save_path_to_use}.")
+            else:
+                logger.error(f"LƯU MÔ HÌNH THẤT BẠI vào {save_path_to_use}.")
     else:
         logger.error("Huấn luyện mô hình hồi quy thất bại. Không có mô hình nào được tạo để lưu.")
 
-
 def run_prediction_pipeline(spark):
     logger.info("Bắt đầu quy trình dự đoán với mô hình HỒI QUY (đọc từ Kafka, ghi ra Elasticsearch)...")
-
-    # --- Bước 1: Tải mô hình đã huấn luyện ---
     model_load_path = getattr(config, 'SAVED_REGRESSION_MODEL_PATH', os.path.join(config.MODELS_DIR, "stock_prediction_pipeline_model_regression"))
     logger.info(f"Đang tải mô hình hồi quy từ: {model_load_path}")
     prediction_model = load_prediction_model(model_load_path)
@@ -94,12 +107,8 @@ def run_prediction_pipeline(spark):
     if not prediction_model:
         logger.error(f"Không thể tải mô hình hồi quy từ {model_load_path}. Kết thúc quy trình dự đoán.")
         return
-
-    # --- Bước 2: Đọc dữ liệu từ elasticsearch ---
-    # --- Cấu hình kết nối Elasticsearch ---
     configure_elasticsearch_connection(spark, config.ES_NODES, config.ES_PORT)
     
-    # --- Tải dữ liệu từ Elasticsearch ---
     raw_data_df = load_raw_data(spark, config.ES_NODES, config.ES_PORT)
     if raw_data_df:
         logger.info("\nDữ liệu thô sau khi join từ Elasticsearch:")
@@ -117,27 +126,15 @@ def run_prediction_pipeline(spark):
 
     logger.info("Stream DataFrame sau khi áp dụng mô hình dự đoán:")
     predictions_df.printSchema()
-    
     predictions_df.select("date", "symbol", "full_article_text", "percentage_change", "prediction").show(10, truncate=10)
-    # Thêm cột timestamp khi dự đoán được tạo ra
-    # Define a window partitioned by symbol and ordered by date
+    
     window_spec = Window.partitionBy("symbol").orderBy("date")
-    # Alternatively, if you want to shift across the entire DataFrame without partitioning:
-    # window_spec = Window.orderBy("date")
-
-    # Add prediction_timestamp as the date from the next row
     predictions_df = predictions_df.withColumn(
         "prediction_timestamp",
         lead("date").over(window_spec)
     )
-
-    # Filter out rows where prediction_timestamp is null (this removes the last row in each partition)
     predictions_df = predictions_df.filter(predictions_df.prediction_timestamp.isNotNull())
-
-    # Show the result to verify
     predictions_df.select("date", "symbol", "prediction", "prediction_timestamp").show(10, truncate=10)
-
-    # Chọn các cột cần thiết để ghi vào Elasticsearch
     output_cols_for_es = [
         "id",
         "date",
@@ -155,7 +152,6 @@ def run_prediction_pipeline(spark):
 
     final_predictions_df = predictions_df.select(existing_output_cols)
 
-    # --- Bước 4: Ghi kết quả streaming ra Elasticsearch ---
     es_host = getattr(config, 'ELASTICSEARCH_HOST', 'elasticsearch')
     es_port = getattr(config, 'ELASTICSEARCH_PORT', '9200')
     es_prediction_index = getattr(config, 'ES_PREDICTION_INDEX', 'stock_predictions')
@@ -168,7 +164,6 @@ def run_prediction_pipeline(spark):
         es_host,
         es_port
     )
-
 
 def main():
     parser = argparse.ArgumentParser(description="Chạy pipeline dự đoán giá cổ phiếu bằng PySpark (Hồi quy).")
@@ -207,10 +202,10 @@ def main():
     finally:
         if spark is not None:
             logger.info("Đang dừng SparkSession.")
-            # Đối với streaming, awaitTermination() sẽ giữ SparkSession chạy.
-            # Lệnh stop() này có thể không cần thiết hoặc chỉ chạy khi có lỗi trước khi start stream.
-            # Nếu streaming query đã start và bạn nhấn Ctrl+C, nó sẽ tự dừng.
-            # spark.stop() # Bỏ comment nếu cần stop SparkSession trong trường hợp không chạy streaming
+            
+            
+            
+            
 
 if __name__ == "__main__":
     main()
