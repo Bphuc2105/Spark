@@ -1,223 +1,179 @@
+# src/train.py
+
 from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.regression import GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.sql.functions import col
-import traceback # Thêm import này
+import traceback
 import os
-import zipfile
-import tempfile
-import shutil
 
-# Import các module cần thiết từ project sử dụng relative import
+# Thử import config và utils để lấy logger và các hằng số
+# Điều này giúp nhất quán với các module khác
 try:
-    from .data_loader import get_spark_session # Chỉ import những gì cần thiết trực tiếp
-    # from .preprocessing import create_preprocessing_pipeline # Không cần thiết ở đây nếu stages được truyền vào
-except ImportError as e:
-    print(f"Lỗi import trong src/train.py: {e}")
-    if 'get_spark_session' not in locals(): 
-        def get_spark_session(app_name="DefaultApp"):
-            from pyspark.sql import SparkSession
-            print("Cảnh báo: get_spark_session không được import đúng cách, sử dụng fallback.")
-            return SparkSession.builder.appName(app_name).master("local[*]").getOrCreate()
+    from . import config # Import config để có thể dùng các hằng số như TEXT_INPUT_COLUMN
+    from .utils import get_logger
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    # Fallback logger nếu import thất bại (ví dụ khi chạy file trực tiếp)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger(__name__)
+    # Fallback config nếu cần (ít khả năng cần trong train.py nếu tham số được truyền đủ)
+    class FallbackConfig:
+        TEXT_INPUT_COLUMN = "full_article_text"
+        NUMERICAL_INPUT_COLUMNS = ["open_price"]
+        RANDOM_SEED = 42
+    config = FallbackConfig()
 
 
-def train_regression_model(spark, training_data_df, preprocessing_pipeline_stages, label_col_name="percentage_change"):
+def train_regression_model(spark, training_data_df, preprocessing_pipeline_stages, label_col_name="percentage_change", features_col_name="features"):
     """
     Huấn luyện mô hình hồi quy sử dụng pipeline tiền xử lý và dữ liệu huấn luyện.
-
-    Args:
-        spark (SparkSession): Đối tượng SparkSession.
-        training_data_df (DataFrame): DataFrame chứa dữ liệu đã được join.
-        preprocessing_pipeline_stages (list): Danh sách các stage của pipeline tiền xử lý.
-        label_col_name (str): Tên của cột nhãn.
-
-    Returns:
-        pyspark.ml.PipelineModel: Mô hình Pipeline đã được huấn luyện.
-                                  Trả về None nếu có lỗi.
+    Quy trình này sẽ fit riêng pipeline tiền xử lý, transform dữ liệu, rồi fit GBTRegressor.
     """
     if training_data_df is None:
-        print("Dữ liệu huấn luyện là None. Không thể huấn luyện mô hình.")
+        logger.error("Dữ liệu huấn luyện là None. Không thể huấn luyện mô hình.")
+        return None
+    if not preprocessing_pipeline_stages:
+        logger.error("Danh sách các giai đoạn tiền xử lý rỗng. Không thể huấn luyện.")
         return None
 
     try:
-        print(f"DEBUG train_regression_model: Sử dụng cột nhãn '{label_col_name}'")
-        # Loại bỏ các hàng có giá trị null trong các cột quan trọng cho features
-        # và cột close_price (cần để tính label bởi SQLTransformer trong preprocessing).
-        # Cột label sẽ được tạo trong pipeline, nên ta sẽ lọc null trên label sau khi transform.
-        columns_to_check_for_feature_input = ["full_article_text", "open_price", "close_price"]
-        cleaned_df_for_features = training_data_df.na.drop(subset=columns_to_check_for_feature_input)
+        logger.info(f"Bắt đầu quy trình huấn luyện GBTRegressor với cột nhãn '{label_col_name}' và cột features '{features_col_name}'.")
 
-        if cleaned_df_for_features.count() == 0:
-            print("Không có dữ liệu sau khi loại bỏ null ban đầu cho các cột features đầu vào.")
+        logger.info("Đang kiểm tra các cột đầu vào cần thiết cho tiền xử lý...")
+        # Xác định các cột thực sự cần thiết cho các stages tiền xử lý đã nhận
+        # Điều này hơi phức tạp vì các stages có thể đa dạng.
+        # Tạm thời giả định các cột quan trọng nhất dựa trên config và logic chung.
+        required_input_cols_for_preprocessing = [
+            getattr(config, 'TEXT_INPUT_COLUMN', 'full_article_text'),
+            'open_price', # Thường dùng trong NUMERICAL_INPUT_COLUMNS
+            'close_price' # Cần cho SQLTransformer tạo label
+        ]
+        # Thêm các cột trong NUMERICAL_INPUT_COLUMNS từ config nếu có
+        required_input_cols_for_preprocessing.extend(getattr(config, 'NUMERICAL_INPUT_COLUMNS', []))
+        required_input_cols_for_preprocessing = list(set(required_input_cols_for_preprocessing)) # Loại bỏ trùng lặp
+
+        actual_cols_to_check_na = [c for c in required_input_cols_for_preprocessing if c in training_data_df.columns]
+        
+        logger.info(f"Các cột sẽ được kiểm tra NA trước khi fit pipeline tiền xử lý: {actual_cols_to_check_na}")
+        cleaned_input_df = training_data_df.na.drop(subset=actual_cols_to_check_na)
+        
+        if cleaned_input_df.count() == 0:
+            logger.error(f"Không còn dữ liệu sau khi loại bỏ NA cho các cột đầu vào tiền xử lý: {actual_cols_to_check_na}. DataFrame gốc có {training_data_df.count()} dòng.")
+            logger.error("Vui lòng kiểm tra dữ liệu đầu vào prices.csv và articles.csv, đặc biệt là các cột được sử dụng để tạo nhãn và đặc trưng.")
+            training_data_df.show(5) # Hiển thị dữ liệu gốc
+            return None
+        logger.info(f"Số dòng sau khi làm sạch NA cho đầu vào tiền xử lý: {cleaned_input_df.count()}")
+
+        # Bước 1: Fit pipeline tiền xử lý
+        logger.info("Đang fit pipeline tiền xử lý...")
+        temp_preprocessing_pipeline = Pipeline(stages=preprocessing_pipeline_stages)
+        fitted_preprocessing_model = temp_preprocessing_pipeline.fit(cleaned_input_df)
+        logger.info("Pipeline tiền xử lý đã được fit.")
+
+        # Bước 2: Transform dữ liệu bằng pipeline tiền xử lý đã fit.
+        logger.info("Đang transform dữ liệu bằng pipeline tiền xử lý đã fit...")
+        # Nên transform trên df đã làm sạch đầu vào, hoặc trên training_data_df nếu các bước tiền xử lý có xử lý NA
+        processed_df = fitted_preprocessing_model.transform(cleaned_input_df)
+        
+        logger.info(f"Schema của DataFrame sau khi tiền xử lý (trước khi lọc null cho nhãn '{label_col_name}'):")
+        processed_df.printSchema()
+        logger.info(f"Các cột có sẵn: {processed_df.columns}")
+
+        if features_col_name not in processed_df.columns:
+            logger.error(f"Lỗi nghiêm trọng: Cột features '{features_col_name}' KHÔNG được tạo ra bởi pipeline tiền xử lý.")
+            return None
+        if label_col_name not in processed_df.columns:
+            logger.error(f"Lỗi nghiêm trọng: Cột nhãn '{label_col_name}' KHÔNG được tạo ra bởi pipeline tiền xử lý (SQLTransformer).")
+            logger.error("Kiểm tra lại SQLTransformer trong preprocessing.py và dữ liệu (open_price, close_price).")
+            processed_df.select("open_price", "close_price", label_col_name).show(10, truncate=False)
             return None
 
-        (train_df_raw, test_df_raw) = cleaned_df_for_features.randomSplit([0.8, 0.2], seed=42)
-        print(f"Số lượng mẫu huấn luyện thô (trước tiền xử lý): {train_df_raw.count()}")
-        print(f"Số lượng mẫu kiểm tra thô (trước tiền xử lý): {test_df_raw.count()}")
+        # Bước 3: Lọc các hàng có giá trị null trong cột nhãn
+        logger.info(f"Đang lọc các hàng có giá trị null trong cột nhãn '{label_col_name}'...")
+        data_for_gbt_training = processed_df.filter(col(label_col_name).isNotNull())
         
-        gbt = GBTRegressor(featuresCol="features", labelCol=label_col_name, maxIter=20) # Sử dụng label_col_name
-
-        # Tạo pipeline chỉ chứa các bước tiền xử lý để biến đổi dữ liệu
-        temp_preprocessing_pipeline_model = Pipeline(stages=preprocessing_pipeline_stages).fit(train_df_raw) # Fit trên train_df_raw
-        
-        print("\nÁp dụng tiền xử lý để tạo nhãn và features cho tập huấn luyện...")
-        processed_train_df = temp_preprocessing_pipeline_model.transform(train_df_raw)
-        
-        print(f"Schema của processed_train_df trước khi lọc null label '{label_col_name}':")
-        processed_train_df.printSchema()
-        
-        final_train_df = processed_train_df.filter(col(label_col_name).isNotNull())
-        final_train_df_count = final_train_df.count() # Cache count
-        print(f"Số lượng mẫu huấn luyện sau khi lọc label '{label_col_name}' NULL: {final_train_df_count}")
-
-        if final_train_df_count == 0:
-            print(f"Không có dữ liệu huấn luyện sau khi lọc các hàng có nhãn '{label_col_name}' NULL.")
+        count_after_label_filter = data_for_gbt_training.count()
+        if count_after_label_filter == 0:
+            logger.error(f"Không có dữ liệu nào còn lại để huấn luyện GBTRegressor sau khi lọc null cho cột nhãn '{label_col_name}'.")
+            logger.info("Xem xét dữ liệu đầu vào (open_price, close_price) và logic tạo nhãn trong SQLTransformer.")
+            logger.info(f"Dữ liệu trước khi lọc null nhãn (cột open_price, close_price, {label_col_name}):")
+            processed_df.select("open_price", "close_price", label_col_name).show(20, truncate=False)
             return None
+        logger.info(f"Số lượng mẫu sau khi lọc null cho nhãn: {count_after_label_filter}")
+
+        # Bước 4: Chia dữ liệu đã xử lý thành tập huấn luyện và tập kiểm tra cho GBTRegressor
+        (train_df_for_gbt, test_df_for_gbt) = data_for_gbt_training.randomSplit([0.8, 0.2], seed=getattr(config, 'RANDOM_SEED', 42))
+        logger.info(f"Số lượng mẫu huấn luyện cho GBT: {train_df_for_gbt.cache().count()}, mẫu kiểm tra cho GBT: {test_df_for_gbt.cache().count()}") # Cache để tối ưu count và sử dụng sau này
+
+        # Bước 5: Khởi tạo và huấn luyện GBTRegressor
+        logger.info(f"Đang khởi tạo GBTRegressor với featuresCol='{features_col_name}' và labelCol='{label_col_name}'...")
+        gbt = GBTRegressor(featuresCol=features_col_name, labelCol=label_col_name, maxIter=20) 
+
+        logger.info(f"Bắt đầu huấn luyện GBTRegressor trên {train_df_for_gbt.count()} mẫu...")
+        gbt_model = gbt.fit(train_df_for_gbt)
+        logger.info("GBTRegressor đã được huấn luyện.")
+
+        # Bước 6: Đánh giá GBTRegressor trên tập kiểm tra
+        if test_df_for_gbt.count() > 0:
+            logger.info("Đang đánh giá GBTRegressor trên tập kiểm tra...")
+            predictions_gbt_test = gbt_model.transform(test_df_for_gbt)
             
-        print(f"\nBắt đầu huấn luyện mô hình GBTRegressor với labelCol='{label_col_name}'...")
-        gbt_model = gbt.fit(final_train_df) # final_train_df đã có 'features' và label_col_name không null
-        print("Huấn luyện GBTRegressor hoàn tất.")
+            logger.info("Một vài dự đoán trên tập kiểm tra GBT:")
+            cols_to_show_eval = [label_col_name, "prediction", features_col_name]
+            # Kiểm tra lại sự tồn tại của cột trước khi select
+            existing_cols_to_show = [c for c in cols_to_show_eval if c in predictions_gbt_test.columns]
+            if existing_cols_to_show:
+                 predictions_gbt_test.select(existing_cols_to_show).show(5, truncate=False)
+            else:
+                logger.warning("Không có cột nào trong danh sách yêu cầu để hiển thị kết quả đánh giá.")
 
-        # Kết hợp các stages tiền xử lý đã fit với mô hình GBT đã huấn luyện
-        complete_pipeline_model = PipelineModel(stages=temp_preprocessing_pipeline_model.stages + [gbt_model])
-        print("Đã tạo PipelineModel hoàn chỉnh.")
 
-        print("\nĐánh giá mô hình trên tập kiểm tra...")
-        processed_test_df = temp_preprocessing_pipeline_model.transform(test_df_raw) # Dùng lại temp_preprocessing_pipeline_model
-        final_test_df = processed_test_df.filter(col(label_col_name).isNotNull())
-        final_test_df_count = final_test_df.count() # Cache count
-        print(f"Số lượng mẫu kiểm tra sau khi lọc label '{label_col_name}' NULL: {final_test_df_count}")
-        
-        if final_test_df_count == 0:
-            print(f"Không có dữ liệu kiểm tra sau khi lọc các hàng có nhãn '{label_col_name}' NULL. Không thể đánh giá.")
-            return complete_pipeline_model 
+            evaluator_rmse = RegressionEvaluator(labelCol=label_col_name, predictionCol="prediction", metricName="rmse")
+            rmse = evaluator_rmse.evaluate(predictions_gbt_test)
+            logger.info(f"GBT - Root Mean Squared Error (RMSE) trên tập kiểm tra: {rmse:.4f}")
 
-        predictions_df = gbt_model.transform(final_test_df)
+            evaluator_r2 = RegressionEvaluator(labelCol=label_col_name, predictionCol="prediction", metricName="r2")
+            r2 = evaluator_r2.evaluate(predictions_gbt_test)
+            logger.info(f"GBT - R-squared (R2) trên tập kiểm tra: {r2:.4f}")
+        else:
+            logger.warning("Tập kiểm tra cho GBT rỗng, bỏ qua bước đánh giá GBT.")
 
-        print("\nMột vài dự đoán trên tập kiểm tra:")
-        # Đảm bảo các cột này tồn tại trong predictions_df trước khi select
-        cols_to_show = [c for c in ["date", "symbol", "open_price", "close_price", label_col_name, "prediction"] if c in predictions_df.columns]
-        predictions_df.select(cols_to_show).show(10, truncate=True)
-
-        evaluator_rmse = RegressionEvaluator(labelCol=label_col_name, predictionCol="prediction", metricName="rmse")
-        rmse = evaluator_rmse.evaluate(predictions_df)
-        print(f"Root Mean Squared Error (RMSE) trên tập kiểm tra: {rmse:.4f}")
-
-        evaluator_mae = RegressionEvaluator(labelCol=label_col_name, predictionCol="prediction", metricName="mae")
-        mae = evaluator_mae.evaluate(predictions_df)
-        print(f"Mean Absolute Error (MAE) trên tập kiểm tra: {mae:.4f}")
-        
-        evaluator_r2 = RegressionEvaluator(labelCol=label_col_name, predictionCol="prediction", metricName="r2")
-        r2 = evaluator_r2.evaluate(predictions_df)
-        print(f"R-squared (R2) trên tập kiểm tra: {r2:.4f}")
+        # Bước 7: Tạo PipelineModel hoàn chỉnh
+        complete_pipeline_model = PipelineModel(stages=fitted_preprocessing_model.stages + [gbt_model])
+        logger.info("Đã tạo PipelineModel hoàn chỉnh.")
 
         return complete_pipeline_model
 
     except Exception as e:
-        print(f"Lỗi trong quá trình huấn luyện mô hình hồi quy: {e}")
-        traceback.print_exc()
+        logger.error(f"Lỗi trong quá trình huấn luyện mô hình GBTRegressor: {e}", exc_info=True)
         return None
 
-def save_model(model, path):
-    """
-    Lưu PipelineModel đã huấn luyện vào file zip một cách an toàn, tránh race conditions.
-
-    Returns:
-        bool: True if saving was successful, False otherwise.
-    """
+def save_model(model, path, is_hdfs_path=False):
     if model is None:
-        print("Mô hình là None. Không thể lưu.")
+        logger.error("Mô hình là None. Không thể lưu.")
         return False
-    if not isinstance(model, PipelineModel):
-        print(f"Đối tượng cung cấp không phải là PipelineModel (type: {type(model)}). Không thể lưu.")
+    if not isinstance(model, PipelineModel): # Kiểm tra model là PipelineModel
+        logger.error(f"Lỗi: Đối tượng được cung cấp để lưu không phải là PipelineModel. Loại đối tượng: {type(model)}")
         return False
-
-    # Chuyển đổi đường dẫn thành đường dẫn tuyệt đối cho file zip cuối cùng
-    abs_zip_path = os.path.abspath(path)
-    if not abs_zip_path.endswith('.zip'):
-        abs_zip_path = abs_zip_path + '.zip'
-
-    # Tạo một thư mục tạm thời CỐ ĐỊNH để Spark lưu model vào.
-    # Chúng ta sẽ tự xóa nó sau khi hoàn tất.
-    model_dir_container = os.path.dirname(abs_zip_path)
-    temp_save_dir = os.path.join(model_dir_container, "temp_spark_model_save")
-
-    print(f"\n--- Bắt đầu quy trình lưu model an toàn ---")
-    print(f"- Đường dẫn file zip cuối cùng: {abs_zip_path}")
-    print(f"- Thư mục lưu model tạm thời: {temp_save_dir}")
-
-    # Xóa thư mục tạm thời cũ nếu nó tồn tại để bắt đầu mới
-    if os.path.exists(temp_save_dir):
-        print(f"Xóa thư mục tạm thời cũ: {temp_save_dir}")
-        shutil.rmtree(temp_save_dir)
-
+            
     try:
-        # Bước 1: Spark lưu model vào thư mục cố định.
-        # Hành động này là blocking và sẽ đợi cho đến khi các job của Spark hoàn tất.
-        print(f"\nBước 1: Spark đang lưu model vào thư mục tạm thời...")
-        model.write().overwrite().save(temp_save_dir)
-        print("Spark đã hoàn tất việc ghi model.")
+        logger.info(f"\nThông tin lưu mô hình:")
+        logger.info(f"- Đường dẫn lưu: {path}")
+        logger.info(f"- Lưu vào HDFS: {is_hdfs_path}")
+        logger.info(f"- Loại mô hình: {type(model)}")
+        if hasattr(model, 'stages'):
+             logger.info(f"- Số lượng stages: {len(model.stages)}")
 
-        # Bước 2: Kiểm tra để chắc chắn rằng thư mục không rỗng.
-        print(f"\nBước 2: Kiểm tra nội dung của thư mục tạm thời...")
-        if not os.path.exists(temp_save_dir) or not os.listdir(temp_save_dir):
-            print(f"LỖI: Thư mục lưu model tạm thời '{temp_save_dir}' rỗng hoặc không tồn tại sau khi Spark lưu!")
-            return False
+        model.write().overwrite().save(path)
+        logger.info(f"Mô hình đã được lưu thành công tại: {path}")
         
-        # In ra một vài file để xác nhận
-        print("Nội dung ví dụ trong thư mục tạm thời:")
-        for item in os.listdir(temp_save_dir)[:5]:
-            print(f"  - {item}")
-
-
-        # Bước 3: Nén thư mục đã được lưu hoàn chỉnh.
-        print(f"\nBước 3: Nén nội dung vào file zip '{abs_zip_path}'...")
-        with zipfile.ZipFile(abs_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for root, dirs, files in os.walk(temp_save_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, temp_save_dir)
-                    zipf.write(file_path, arcname)
-        print("Nén file zip hoàn tất.")
-
-        # Bước 4: Kiểm tra file zip cuối cùng
-        if os.path.exists(abs_zip_path) and os.path.getsize(abs_zip_path) > 1024: # Kiểm tra > 1KB
-            print(f"\nTHÀNH CÔNG: Mô hình đã được lưu tại: {abs_zip_path}")
-            print(f"Kích thước file: {os.path.getsize(abs_zip_path) / (1024 * 1024):.2f} MB")
-            return True
-        else:
-            print(f"\nLỖI: File zip cuối cùng bị rỗng hoặc không tạo được.")
-            print(f"Kích thước file: {os.path.getsize(abs_zip_path) if os.path.exists(abs_zip_path) else 'N/A'}")
-            return False
-
+        if not is_hdfs_path and os.path.exists(path):
+            logger.info(f"Kiểm tra cục bộ: Thư mục mô hình tồn tại tại {path}")
+        elif is_hdfs_path:
+            logger.info("Lưu ý: Để kiểm tra sự tồn tại trên HDFS, bạn cần sử dụng các lệnh HDFS (ví dụ: hdfs dfs -ls path).")
+        return True
     except Exception as e:
-        print(f"Lỗi xảy ra trong quá trình lưu model: {e}")
-        traceback.print_exc()
+        logger.error(f"Lỗi khi lưu mô hình vào {path}: {e}", exc_info=True)
         return False
-    finally:
-        # Bước 5: Dọn dẹp thư mục tạm thời.
-        # Khối finally này sẽ luôn chạy, dù có lỗi hay không.
-        if os.path.exists(temp_save_dir):
-            print(f"\nBước 5: Dọn dẹp, xóa thư mục tạm thời '{temp_save_dir}'.")
-            shutil.rmtree(temp_save_dir)
-        print("--- Kết thúc quy trình lưu model ---")
-
-if __name__ == "__main__":
-    from pyspark.ml import Pipeline
-    from pyspark.ml.feature import Tokenizer
-    from pyspark.sql import SparkSession
-
-    from data_loader import get_spark_session
-    
-    # Create a Spark session
-    spark = get_spark_session("Test")
-    # Dummy data
-    df = spark.createDataFrame([(1, "Hello world")], ["id", "text"])
-
-    # Minimal pipeline
-    tokenizer = Tokenizer(inputCol="text", outputCol="words")
-    pipeline = Pipeline(stages=[tokenizer])
-    model = pipeline.fit(df)
-    result = save_model(model, "test_model.zip")
-    print("Save result:", result)
-        

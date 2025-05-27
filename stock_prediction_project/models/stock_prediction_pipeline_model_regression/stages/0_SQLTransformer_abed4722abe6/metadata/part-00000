@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.SQLTransformer","timestamp":1748335373603,"sparkVersion":"3.4.1","uid":"SQLTransformer_abed4722abe6","paramMap":{"statement":"SELECT *, (close_price - open_price) AS percentage_change FROM __THIS__"},"defaultParamMap":{}}

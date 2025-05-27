@@ -268,6 +268,7 @@ def load_raw_data(spark, es_host="localhost", es_port="9200", stock_index="price
         return
     return joined_df
 
+
 # --- Hàm mới: Đọc dữ liệu từ Kafka bằng Spark Structured Streaming ---
 
 kafka_data_schema = StructType([

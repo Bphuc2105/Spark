@@ -22,7 +22,7 @@ import numpy as np
 from pyspark.ml import Pipeline as SparkNlpPipeline
 
 class StockChunkExtractor(Transformer, DefaultParamsReadable, DefaultParamsWritable):
-    def __init__(self, inputCol="full_article_text", stockCol="stock_code", outputCol="text_feature", stockMap = None):
+    def __init__(self, inputCol="full_article_text", stockCol="symbol", outputCol="text_feature", stockMap = None):
         super().__init__()
         self.inputCol = inputCol
         self.stockCol = stockCol

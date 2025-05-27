@@ -4,6 +4,8 @@ import argparse
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 from pyspark.sql.functions import col, to_date, lit, current_timestamp
+from pyspark.sql import Window
+from pyspark.sql.functions import lead
 import os
 import sys
 import traceback
@@ -17,8 +19,8 @@ try:
     from src.data_loader import load_raw_data, read_stream_from_kafka, configure_elasticsearch_connection     # Import hàm mới để đọc từ Kafka cho chế độ predict
     from src.preprocessing import create_preprocessing_pipeline
     from src.train import train_regression_model, save_model
-    from src.predict import load_prediction_model, make_predictions, write_stream_to_elasticsearch
-
+    from src.predict import load_prediction_model, make_predictions, write_dataframe_to_elasticsearch
+    
 except ImportError as e:
     print(f"LỖI IMPORT TRONG MAIN.PY: {e}")
     print("Hãy đảm bảo cấu trúc thư mục đúng (main.py và src/...) và PYTHONPATH được thiết lập chính xác.")
@@ -93,34 +95,47 @@ def run_prediction_pipeline(spark):
         logger.error(f"Không thể tải mô hình hồi quy từ {model_load_path}. Kết thúc quy trình dự đoán.")
         return
 
-    # --- Bước 2: Đọc dữ liệu streaming từ Kafka ---
-    kafka_broker = getattr(config, 'KAFKA_BROKER', 'kafka:9092')
-    news_articles_topic = getattr(config, 'NEWS_ARTICLES_TOPIC', 'news_articles')
-    logger.info(f"Đang đọc stream từ Kafka broker: {kafka_broker}, topic: {news_articles_topic}")
-
-    streaming_input_df = read_stream_from_kafka(spark, kafka_broker, news_articles_topic)
-
-    if streaming_input_df is None:
-        logger.error("Không thể khởi tạo stream từ Kafka. Kết thúc quy trình dự đoán.")
+    # --- Bước 2: Đọc dữ liệu từ elasticsearch ---
+    # --- Cấu hình kết nối Elasticsearch ---
+    configure_elasticsearch_connection(spark, config.ES_NODES, config.ES_PORT)
+    
+    # --- Tải dữ liệu từ Elasticsearch ---
+    raw_data_df = load_raw_data(spark, config.ES_NODES, config.ES_PORT)
+    if raw_data_df:
+        logger.info("\nDữ liệu thô sau khi join từ Elasticsearch:")
+        raw_data_df.show(5, truncate=True)
+        raw_data_df.printSchema()
+    else:
+        print("Fail")
         return
 
-    logger.info("Stream DataFrame từ Kafka đã sẵn sàng.")
-    streaming_input_df.printSchema()
+    predictions_df = make_predictions(prediction_model, raw_data_df)
 
-    # --- Bước 3: Áp dụng pipeline tiền xử lý và mô hình dự đoán lên stream ---
-    logger.info("Đang áp dụng mô hình dự đoán lên stream dữ liệu...")
-
-    predictions_stream_df = make_predictions(prediction_model, streaming_input_df)
-
-    if predictions_stream_df is None:
+    if predictions_df is None:
         logger.error("Áp dụng mô hình dự đoán lên stream thất bại. Kết thúc quy trình.")
         return
 
     logger.info("Stream DataFrame sau khi áp dụng mô hình dự đoán:")
-    predictions_stream_df.printSchema()
-
+    predictions_df.printSchema()
+    
+    predictions_df.select("date", "symbol", "full_article_text", "percentage_change", "prediction").show(10, truncate=10)
     # Thêm cột timestamp khi dự đoán được tạo ra
-    predictions_stream_df = predictions_stream_df.withColumn("prediction_timestamp", current_timestamp())
+    # Define a window partitioned by symbol and ordered by date
+    window_spec = Window.partitionBy("symbol").orderBy("date")
+    # Alternatively, if you want to shift across the entire DataFrame without partitioning:
+    # window_spec = Window.orderBy("date")
+
+    # Add prediction_timestamp as the date from the next row
+    predictions_df = predictions_df.withColumn(
+        "prediction_timestamp",
+        lead("date").over(window_spec)
+    )
+
+    # Filter out rows where prediction_timestamp is null (this removes the last row in each partition)
+    predictions_df = predictions_df.filter(predictions_df.prediction_timestamp.isNotNull())
+
+    # Show the result to verify
+    predictions_df.select("date", "symbol", "prediction", "prediction_timestamp").show(10, truncate=10)
 
     # Chọn các cột cần thiết để ghi vào Elasticsearch
     output_cols_for_es = [
@@ -133,12 +148,12 @@ def run_prediction_pipeline(spark):
         "prediction_timestamp"
     ]
 
-    existing_output_cols = [c for c in output_cols_for_es if c in predictions_stream_df.columns]
+    existing_output_cols = [c for c in output_cols_for_es if c in predictions_df.columns]
     if not existing_output_cols:
-         logger.error("Không có cột nào được chọn để ghi vào Elasticsearch tồn tại trong stream DataFrame.")
-         return
+        logger.error("Không có cột nào được chọn để ghi vào Elasticsearch tồn tại trong stream DataFrame.")
+        return
 
-    final_predictions_stream_df = predictions_stream_df.select(existing_output_cols)
+    final_predictions_df = predictions_df.select(existing_output_cols)
 
     # --- Bước 4: Ghi kết quả streaming ra Elasticsearch ---
     es_host = getattr(config, 'ELASTICSEARCH_HOST', 'elasticsearch')
@@ -147,20 +162,12 @@ def run_prediction_pipeline(spark):
 
     logger.info(f"Đang ghi stream kết quả dự đoán ra Elasticsearch index: {es_prediction_index} tại {es_host}:{es_port}")
 
-    streaming_query = write_stream_to_elasticsearch(
-        final_predictions_stream_df,
+    write_dataframe_to_elasticsearch(
+        final_predictions_df,
         es_prediction_index,
         es_host,
         es_port
     )
-
-    if streaming_query:
-        logger.info("Streaming query để ghi ra Elasticsearch đã bắt đầu.")
-        logger.info("Đang chờ stream kết thúc (Ctrl+C để dừng)...")
-        streaming_query.awaitTermination()
-        logger.info("Streaming query đã dừng.")
-    else:
-        logger.error("Không thể bắt đầu streaming query để ghi ra Elasticsearch.")
 
 
 def main():
