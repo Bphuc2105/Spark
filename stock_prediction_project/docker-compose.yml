@@ -1,4 +1,37 @@
+
+
 services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    restart: always
+    ports:
+      - "9870:9870" # NameNode Web UI
+      - "9000:9000" # HDFS IPC
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=stock_cluster
+    env_file:
+      - ./hadoop.env
+    networks:
+      - spark-network
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    restart: always
+    depends_on:
+      - namenode
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870" # Đợi NameNode UI sẵn sàng trên port 9870
+    env_file:
+      - ./hadoop.env
+    networks:
+      - spark-network
+
   spark-master:
     image: bitnami/spark:3.4.1
     container_name: spark-master
@@ -9,18 +42,19 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
     ports:
-      - '8080:8080' # Spark Master Web UI
-      - '7077:7077' # Spark Master internal communication
+      - '8080:8080'
+      - '7077:7077'
     networks:
       - spark-network
 
-  spark-worker: # Changed from spark-worker to spark-worker-1 to match logs
-    build: # ADDED: Worker will now build from Dockerfile
+  spark-worker:
+    build:
       context: .
-      dockerfile: Dockerfile # Assumes the same Dockerfile installs requirements
-    container_name: spark-worker
+      dockerfile: Dockerfile
+    container_name: spark-worker # Giữ tên này nếu chỉ có 1 worker
     depends_on:
       - spark-master
+      - namenode # Worker cũng nên thấy NameNode
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -30,25 +64,24 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
-      # Ensure PYTHONPATH is also set for worker if it runs Python processes directly (though Spark usually handles this for executors)
-      # - PYTHONPATH=/app 
     ports:
-      - '8081:8081' # Spark Worker Web UI
-    volumes: 
-      # This mount makes your project files available at /app inside the worker.
-      # The Dockerfile build process will use files from the context, but this ensures runtime access if needed.
-      - .:/app 
+      - '8081:8081'
+    volumes:
+      - .:/app
     networks:
       - spark-network
 
   spark-app:
     build:
       context: .
-      dockerfile: Dockerfile 
+      dockerfile: Dockerfile
     container_name: spark-app-submitter
     depends_on:
       - spark-master
-      - kafka 
+      - kafka
+      - elasticsearch # Thêm elasticsearch vào depends_on nếu app ghi vào đó
+      - namenode    # QUAN TRỌNG: spark-app cần HDFS sẵn sàng
+      - datanode    # Thêm datanode để chắc chắn hơn
     environment:
       - SPARK_MASTER_URL_FOR_PYTHON_CODE=spark://spark-master:7077
       - PYTHONUNBUFFERED=1
@@ -57,30 +90,32 @@ services:
       - ELASTICSEARCH_HOST=elasticsearch
       - ELASTICSEARCH_PORT=9200
       - ES_PREDICTION_INDEX=stock_predictions
+      # Biến môi trường để Python code biết HDFS path (sử dụng trong src/config.py)
+      - HDFS_NAMENODE_URL=hdfs://namenode:9000
+      - HADOOP_USER_NAME=spark
     volumes:
-      # These specific mounts ensure the driver container (spark-app-submitter)
-      # has the latest code from your host, which is good for development.
-      # The build context already copies these, but volumes ensure live updates if you modify code without rebuilding.
-      - ./__init__.py:/app/__init__.py 
-      - ./main.py:/app/main.py       
-      - ./src:/app/src 
+      # Giữ nguyên các mount cụ thể nếu bạn muốn, hoặc đơn giản hóa thành .:/app
+      - ./__init__.py:/app/__init__.py
+      - ./main.py:/app/main.py
+      - ./src:/app/src
       - ./models:/app/models
-      - ./data:/app/data 
+      - ./data:/app/data
       - spark_checkpoint:/app/checkpoint
     networks:
       - spark-network
     command: >
-      sh -c "echo '--- Listing contents of /app (from spark-app) ---' && \
+      sh -c "echo '--- Waiting for HDFS to be ready (simple check) ---' && \
+      sleep 15 && \
+      echo '--- Listing contents of /app (from spark-app) ---' && \
       ls -l /app && \
-      echo '--- Listing contents of /app/src (from spark-app, mounted from host ./src) ---' && \
-      ls -l /app/src && \
-      echo '--- Attempting to submit Spark job in TRAIN mode with executor PYTHONPATH ---' && \
+      echo '--- Attempting to submit Spark job in TRAIN mode ---' && \
       spark-submit \
       --master spark://spark-master:7077 \
       --deploy-mode client \
       --conf spark.executorEnv.PYTHONPATH=/app \
+      --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000 \
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0 \
-      /app/main.py train"
+      /app/main.py train" 
 
   zookeeper:
     image: bitnami/zookeeper:3.8.3
@@ -98,15 +133,15 @@ services:
     depends_on:
       - zookeeper
     ports:
-      - '9092:9092' 
-      - '9093:9093' 
+      - '9092:9092'
+      - '9093:9093'
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
       - KAFKA_LISTENERS=PLAINTEXT://:9092,EXTERNAL://:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093 
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
       - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
     networks:
       - spark-network
 
@@ -123,7 +158,7 @@ services:
     networks:
       - spark-network
     volumes:
-      - esdata:/usr/share/elasticsearch/data 
+      - esdata:/usr/share/elasticsearch/data
 
   kibana:
     image: docker.elastic.co/kibana/kibana:8.11.0
@@ -138,9 +173,13 @@ services:
       - spark-network
 
 volumes:
+  namenode_data: # THÊM ĐỊNH NGHĨA
+    driver: local
+  datanode_data: # THÊM ĐỊNH NGHĨA
+    driver: local
   esdata:
     driver: local
-  spark_checkpoint: 
+  spark_checkpoint:
     driver: local
 
 networks:

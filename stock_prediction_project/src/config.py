@@ -17,7 +17,7 @@ PREDICT_PRICES_FILE = f"{DATA_DIR}/new_prices.csv"
 PREDICT_ARTICLES_FILE = f"{DATA_DIR}/new_articles.csv"
 
 # Đường dẫn để lưu/tải mô hình đã huấn luyện
-SAVED_REGRESSION_MODEL_PATH = f"{MODELS_DIR}/stock_prediction_pipeline_model_regression" # Đã sửa tên biến cho rõ ràng
+HDFS_MODEL_SAVE_PATH = "hdfs://namenode:9000/user/stock_models/stock_prediction_pipeline_model_regression"
 
 # --- Cấu hình tiền xử lý ---
 TEXT_INPUT_COLUMN = "full_article_text"
